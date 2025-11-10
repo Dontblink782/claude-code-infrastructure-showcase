@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(for file in /root/git/claude-code-infrastructure-showcase/.claude/skills/frontend-dev-guidelines/resources/*.md)",
-      "Bash(done)"
+      "Bash(done)",
+      "WebFetch(domain:supabase.com)"
     ],
     "deny": [],
     "ask": []
