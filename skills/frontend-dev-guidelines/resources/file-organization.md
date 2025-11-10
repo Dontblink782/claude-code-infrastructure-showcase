@@ -1,268 +1,468 @@
 # File Organization
 
-Proper file and directory structure for maintainable, scalable frontend code in the the application.
+Proper file and directory structure for maintainable, scalable Next.js 15 App Router applications.
 
 ---
 
-## features/ vs components/ Distinction
+## Next.js 15 App Router Structure
 
-### features/ Directory
+### Root Directory Layout
 
-**Purpose**: Domain-specific features with their own logic, API, and components
+```
+project-root/
+├── app/                          # Next.js App Router
+│   ├── (auth)/                   # Route groups (auth pages)
+│   │   ├── login/
+│   │   │   └── page.tsx
+│   │   └── signup/
+│   │       └── page.tsx
+│   ├── orders/                   # Order routes
+│   │   ├── page.tsx              # /orders
+│   │   ├── loading.tsx           # Loading UI
+│   │   ├── error.tsx             # Error UI
+│   │   └── [id]/
+│   │       └── page.tsx          # /orders/[id]
+│   ├── dashboard/
+│   │   └── page.tsx
+│   ├── layout.tsx                # Root layout
+│   └── page.tsx                  # Home page
+│
+├── actions/                      # Server Actions (flat structure)
+│   ├── orders.ts                 # Order mutations/fetches
+│   ├── customers.ts              # Customer operations
+│   └── auth.ts                   # Authentication actions
+│
+├── features/                     # Domain-specific features
+│   ├── orders/
+│   │   ├── components/           # Order-specific components
+│   │   │   ├── OrdersTable.tsx
+│   │   │   ├── OrdersSearch.tsx
+│   │   │   └── badges/
+│   │   │       └── OrderPaymentBadge.tsx
+│   │   └── hooks/                # Order-specific hooks
+│   │       ├── useSearchOrders.ts
+│   │       └── useUpdateOrder.ts
+│   ├── customers/
+│   └── dashboard/
+│
+├── components/                   # Shared components (3+ uses)
+│   ├── ui/                       # ShadCN base components
+│   │   ├── button.tsx
+│   │   ├── badge.tsx
+│   │   ├── card.tsx
+│   │   └── table.tsx
+│   └── domain/                   # Shared domain wrappers
+│       └── badges/
+│           └── PaymentStatusBadge.tsx
+│
+├── lib/                          # Utilities and configuration
+│   ├── db.ts                     # Prisma client
+│   ├── utils.ts                  # cn() helper, etc.
+│   └── validations/              # Zod schemas
+│       └── order.ts
+│
+├── types/                        # TypeScript types
+│   ├── order.ts
+│   ├── customer.ts
+│   └── index.ts
+│
+└── public/                       # Static assets
+    └── images/
+```
 
-**When to use:**
-- Feature has multiple related components
-- Feature has its own API endpoints
-- Feature has domain-specific logic
-- Feature has custom hooks/utilities
+---
+
+## app/ Directory (Routes)
+
+### Route Structure
+
+**Next.js App Router uses file-system based routing:**
+
+```
+app/
+├── page.tsx              → /
+├── about/
+│   └── page.tsx          → /about
+├── orders/
+│   ├── page.tsx          → /orders
+│   └── [id]/
+│       └── page.tsx      → /orders/123
+└── dashboard/
+    ├── page.tsx          → /dashboard
+    └── settings/
+        └── page.tsx      → /dashboard/settings
+```
+
+### Special Files
+
+**Next.js reserves specific filenames:**
+
+| File | Purpose | Example |
+|------|---------|---------|
+| `page.tsx` | Route UI | `/orders` page |
+| `layout.tsx` | Shared layout | Wraps pages |
+| `loading.tsx` | Loading UI | Suspense fallback |
+| `error.tsx` | Error UI | Error boundary |
+| `not-found.tsx` | 404 page | Custom 404 |
+| `route.ts` | API endpoint | API route handler |
+
+### Route Groups
+
+**Use parentheses for organization without URL segments:**
+
+```
+app/
+├── (marketing)/          # NOT in URL
+│   ├── about/
+│   │   └── page.tsx      → /about
+│   └── contact/
+│       └── page.tsx      → /contact
+└── (dashboard)/          # NOT in URL
+    ├── orders/
+    │   └── page.tsx      → /orders
+    └── customers/
+        └── page.tsx      → /customers
+```
+
+**Benefits:**
+- Organize routes logically
+- Apply different layouts
+- No impact on URL structure
+
+---
+
+## actions/ Directory
+
+### Server Actions Structure
+
+**Flat structure** - one file per domain:
+
+```
+actions/
+├── orders.ts             # All order operations
+├── customers.ts          # All customer operations
+├── products.ts           # All product operations
+└── auth.ts               # Authentication operations
+```
+
+### Server Action File Pattern
+
+```typescript
+// actions/orders.ts
+'use server';
+
+import { prisma } from '@/lib/db';
+import { revalidatePath } from 'next/cache';
+import { redirect } from 'next/navigation';
+
+// Fetch operations
+export async function getOrders(filters?: { status?: string }) {
+    return await prisma.order.findMany({
+        where: filters?.status ? { status: filters.status } : undefined,
+        include: { customer: true },
+        orderBy: { createdAt: 'desc' },
+    });
+}
+
+export async function getOrder(id: string) {
+    const order = await prisma.order.findUnique({
+        where: { id },
+        include: { customer: true, items: true },
+    });
+
+    if (!order) throw new Error('Order not found');
+    return order;
+}
+
+// Mutation operations
+export async function createOrder(formData: FormData) {
+    const order = await prisma.order.create({
+        data: {
+            customerId: formData.get('customerId') as string,
+            amount: parseFloat(formData.get('amount') as string),
+        },
+    });
+
+    revalidatePath('/orders');
+    redirect(`/orders/${order.id}`);
+}
+
+export async function updateOrder(id: string, formData: FormData) {
+    await prisma.order.update({
+        where: { id },
+        data: { status: formData.get('status') as string },
+    });
+
+    revalidatePath('/orders');
+    revalidatePath(`/orders/${id}`);
+}
+
+export async function deleteOrder(id: string) {
+    await prisma.order.delete({ where: { id } });
+    revalidatePath('/orders');
+}
+
+// Search/filter operations
+export async function searchOrders(query: string) {
+    return await prisma.order.findMany({
+        where: {
+            OR: [
+                { id: { contains: query, mode: 'insensitive' } },
+                { customerName: { contains: query, mode: 'insensitive' } },
+            ],
+        },
+        take: 20,
+    });
+}
+```
+
+**Key Points:**
+- `'use server'` at top of file
+- Group by domain (orders, customers, etc.)
+- Export individual functions
+- Include fetches AND mutations
+- Revalidation after mutations
+
+---
+
+## features/ Directory
+
+### Purpose
+
+**Domain-specific components and logic** - start here, move to `components/` when used 3+ times.
+
+### Feature Structure
+
+```
+features/
+  orders/
+    components/          # Order-specific UI components
+      OrdersTable.tsx
+      OrdersSearch.tsx
+      OrderCard.tsx
+      badges/            # Subdirectory for related components
+        OrderPaymentBadge.tsx
+        OrderStatusBadge.tsx
+      buttons/
+        OrderActionButton.tsx
+    hooks/               # Order-specific client hooks
+      useSearchOrders.ts
+      useUpdateOrder.ts
+      useOrderFilters.ts
+    helpers/             # Utility functions (optional)
+      orderHelpers.ts
+    types/               # Feature-specific types (optional)
+      index.ts
+```
+
+### Component Subdirectories
+
+**Organize by component type when >5 components:**
+
+```
+features/orders/components/
+├── OrdersTable.tsx       # Main components (flat)
+├── OrdersSearch.tsx
+├── badges/               # Group related components
+│   ├── OrderPaymentBadge.tsx
+│   └── OrderStatusBadge.tsx
+├── buttons/
+│   └── OrderActionButton.tsx
+└── cards/
+    └── OrderCard.tsx
+```
+
+### When to Create a New Feature
+
+**Create new feature when:**
+- Multiple related components (3+)
+- Domain-specific logic
+- Custom hooks needed
+- Will grow over time
 
 **Examples:**
-- `features/posts/` - Project catalog/post management
-- `features/blogs/` - Blog builder and rendering
+- `features/orders/` - Order management
+- `features/customers/` - Customer operations
+- `features/dashboard/` - Dashboard widgets
 - `features/auth/` - Authentication flows
 
-**Structure:**
-```
-features/
-  my-feature/
-    api/
-      myFeatureApi.ts         # API service layer
-    components/
-      MyFeatureMain.tsx       # Main component
-      SubComponents/          # Related components
-    hooks/
-      useMyFeature.ts         # Custom hooks
-      useSuspenseMyFeature.ts # Suspense hooks
-    helpers/
-      myFeatureHelpers.ts     # Utility functions
-    types/
-      index.ts                # TypeScript types
-    index.ts                  # Public exports
-```
-
-### components/ Directory
-
-**Purpose**: Truly reusable components used across multiple features
-
-**When to use:**
-- Component is used in 3+ places
-- Component is generic (no feature-specific logic)
-- Component is a UI primitive or pattern
-
-**Examples:**
-- `components/SuspenseLoader/` - Loading wrapper
-- `components/CustomAppBar/` - Application header
-- `components/ErrorBoundary/` - Error handling
-- `components/LoadingOverlay/` - Loading overlay
-
-**Structure:**
-```
-components/
-  SuspenseLoader/
-    SuspenseLoader.tsx
-    SuspenseLoader.test.tsx
-  CustomAppBar/
-    CustomAppBar.tsx
-    CustomAppBar.test.tsx
-```
-
 ---
 
-## Feature Directory Structure (Detailed)
+## components/ Directory
 
-### Complete Feature Example
+### Purpose
 
-Based on `features/posts/` structure:
+**Truly reusable components** used across 3+ features.
+
+### Structure
 
 ```
-features/
-  posts/
-    api/
-      postApi.ts              # API service layer (GET, POST, PUT, DELETE)
-
-    components/
-      PostTable.tsx           # Main container component
-      grids/
-        PostDataGrid/
-          PostDataGrid.tsx
-      drawers/
-        ProjectPostDrawer/
-          ProjectPostDrawer.tsx
-      cells/
-        editors/
-          TextEditCell.tsx
-        renderers/
-          DateCell.tsx
-      toolbar/
-        CustomToolbar.tsx
-
-    hooks/
-      usePostQueries.ts       # Regular queries
-      useSuspensePost.ts      # Suspense queries
-      usePostMutations.ts     # Mutations
-      useGridLayout.ts              # Feature-specific hooks
-
-    helpers/
-      postHelpers.ts          # Utility functions
-      validation.ts                 # Validation logic
-
-    types/
-      index.ts                      # TypeScript types/interfaces
-
-    queries/
-      postQueries.ts          # Query key factories (optional)
-
-    context/
-      PostContext.tsx         # React context (if needed)
-
-    index.ts                        # Public API exports
+components/
+├── ui/                      # ShadCN base components
+│   ├── button.tsx
+│   ├── badge.tsx
+│   ├── card.tsx
+│   ├── table.tsx
+│   ├── input.tsx
+│   └── dialog.tsx
+└── domain/                  # Shared domain wrappers
+    ├── badges/
+    │   └── PaymentStatusBadge.tsx
+    ├── cards/
+    │   └── StatCard.tsx
+    └── layouts/
+        └── PageHeader.tsx
 ```
 
-### Subdirectory Guidelines
+### components/ui/ (ShadCN)
 
-#### api/ Directory
+**Generated by ShadCN CLI** - DO NOT modify structure:
 
-**Purpose**: Centralized API calls for the feature
+```bash
+npx shadcn-ui@latest add button
+npx shadcn-ui@latest add badge
+npx shadcn-ui@latest add card
+```
 
-**Files:**
-- `{feature}Api.ts` - Main API service
+Creates:
+```
+components/ui/
+├── button.tsx
+├── badge.tsx
+└── card.tsx
+```
 
-**Pattern:**
+**Never import base components directly** - use wrappers instead.
+
+### components/domain/ (Wrappers)
+
+**Shared domain wrappers** moved from features/ when used 3+ times:
+
 ```typescript
-// features/my-feature/api/myFeatureApi.ts
-import apiClient from '@/lib/apiClient';
+// components/domain/badges/PaymentStatusBadge.tsx
+import { Badge } from '@/components/ui/badge';
 
-export const myFeatureApi = {
-    getItem: async (id: number) => {
-        const { data } = await apiClient.get(`/blog/items/${id}`);
-        return data;
-    },
-    createItem: async (payload) => {
-        const { data } = await apiClient.post('/blog/items', payload);
-        return data;
-    },
-};
-```
+interface PaymentStatusBadgeProps {
+    status: 'paid' | 'unpaid' | 'pending';
+}
 
-#### components/ Directory
+export function PaymentStatusBadge({ status }: PaymentStatusBadgeProps) {
+    const config = {
+        paid: { label: 'Paid', className: 'bg-green-500 text-white' },
+        unpaid: { label: 'Unpaid', className: 'bg-red-500 text-white' },
+        pending: { label: 'Pending', className: 'bg-yellow-500 text-white' },
+    };
 
-**Purpose**: Feature-specific components
-
-**Organization:**
-- Flat structure if <5 components
-- Subdirectories by responsibility if >5 components
-
-**Examples:**
-```
-components/
-  MyFeatureMain.tsx           # Main component
-  MyFeatureHeader.tsx         # Supporting components
-  MyFeatureFooter.tsx
-
-  # OR with subdirectories:
-  containers/
-    MyFeatureContainer.tsx
-  presentational/
-    MyFeatureDisplay.tsx
-  blogs/
-    MyFeatureBlog.tsx
-```
-
-#### hooks/ Directory
-
-**Purpose**: Custom hooks for the feature
-
-**Naming:**
-- `use` prefix (camelCase)
-- Descriptive of what they do
-
-**Examples:**
-```
-hooks/
-  useMyFeature.ts               # Main hook
-  useSuspenseMyFeature.ts       # Suspense version
-  useMyFeatureMutations.ts      # Mutations
-  useMyFeatureFilters.ts        # Filters/search
-```
-
-#### helpers/ Directory
-
-**Purpose**: Utility functions specific to the feature
-
-**Examples:**
-```
-helpers/
-  myFeatureHelpers.ts           # General utilities
-  validation.ts                 # Validation logic
-  transblogers.ts               # Data transblogations
-  constants.ts                  # Constants
-```
-
-#### types/ Directory
-
-**Purpose**: TypeScript types and interfaces
-
-**Files:**
-```
-types/
-  index.ts                      # Main types, exported
-  internal.ts                   # Internal types (not exported)
+    const { label, className } = config[status];
+    return <Badge className={className}>{label}</Badge>;
+}
 ```
 
 ---
 
-## Import Aliases (Vite Configuration)
+## Hybrid Location Strategy
 
-### Available Aliases
+### The 3+ Rule
 
-From `vite.config.ts` lines 180-185:
+**Components start in features/, move to components/ when used 3+ times.**
 
-| Alias | Resolves To | Use For |
-|-------|-------------|---------|
-| `@/` | `src/` | Absolute imports from src root |
-| `~types` | `src/types` | Shared TypeScript types |
-| `~components` | `src/components` | Reusable components |
-| `~features` | `src/features` | Feature imports |
+**Example - OrderPaymentBadge evolution:**
+
+**Step 1: Created in features/ (single use)**
+```
+features/orders/components/badges/OrderPaymentBadge.tsx
+```
+
+**Step 2: Used in 3 places**
+- Orders page
+- Invoices page
+- Payment history page
+
+**Step 3: Move to components/domain/**
+```
+components/domain/badges/PaymentStatusBadge.tsx
+```
+
+**Step 4: Update imports**
+```typescript
+// Before (feature-specific)
+import { OrderPaymentBadge } from '@/features/orders/components/badges/OrderPaymentBadge';
+
+// After (shared)
+import { PaymentStatusBadge } from '@/components/domain/badges/PaymentStatusBadge';
+```
+
+### Migration Checklist
+
+When moving component to shared:
+
+- [ ] Copy component to `components/domain/`
+- [ ] Rename if needed (OrderPaymentBadge → PaymentStatusBadge)
+- [ ] Update all import paths
+- [ ] Delete original from features/
+- [ ] Test all usages
+
+---
+
+## Import Aliases
+
+### Next.js Default: @/
+
+**Next.js configures `@/` to resolve to project root by default.**
+
+**tsconfig.json:**
+```json
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./*"]
+    }
+  }
+}
+```
 
 ### Usage Examples
 
 ```typescript
-// ✅ PREFERRED - Use aliases for absolute imports
-import { apiClient } from '@/lib/apiClient';
-import { SuspenseLoader } from '~components/SuspenseLoader';
-import { postApi } from '~features/posts/api/postApi';
-import type { User } from '~types/user';
+// Actions
+import { getOrders } from '@/actions/orders';
 
-// ❌ AVOID - Relative paths from deep nesting
-import { apiClient } from '../../../lib/apiClient';
-import { SuspenseLoader } from '../../../components/SuspenseLoader';
+// Features
+import { OrdersTable } from '@/features/orders/components/OrdersTable';
+import { useSearchOrders } from '@/features/orders/hooks/useSearchOrders';
+
+// Shared Components
+import { Button } from '@/components/ui/button';
+import { PaymentStatusBadge } from '@/components/domain/badges/PaymentStatusBadge';
+
+// Lib
+import { prisma } from '@/lib/db';
+import { cn } from '@/lib/utils';
+
+// Types
+import type { Order } from '@/types/order';
 ```
 
-### When to Use Which Alias
+### Why Single Alias?
 
-**@/ (General)**:
-- Lib utilities: `@/lib/apiClient`
-- Hooks: `@/hooks/useAuth`
-- Config: `@/config/theme`
-- Shared services: `@/services/authService`
+**Simplicity:**
+- One alias to remember
+- Consistent across project
+- Next.js convention
+- Easy to refactor
 
-**~types (Type Imports)**:
+**vs Multiple Aliases:**
 ```typescript
-import type { Post } from '~types/post';
-import type { User, UserRole } from '~types/user';
-```
+// ❌ AVOID - Multiple aliases (old Vite pattern)
+import type { Order } from '~types/order';
+import { Button } from '~components/ui/button';
+import { getOrders } from '~actions/orders';
 
-**~components (Reusable Components)**:
-```typescript
-import { SuspenseLoader } from '~components/SuspenseLoader';
-import { CustomAppBar } from '~components/CustomAppBar';
-import { ErrorBoundary } from '~components/ErrorBoundary';
-```
-
-**~features (Feature Imports)**:
-```typescript
-import { postApi } from '~features/posts/api/postApi';
-import { useAuth } from '~features/auth/hooks/useAuth';
+// ✅ PREFER - Single @/ alias
+import type { Order } from '@/types/order';
+import { Button } from '@/components/ui/button';
+import { getOrders } from '@/actions/orders';
 ```
 
 ---
@@ -271,232 +471,299 @@ import { useAuth } from '~features/auth/hooks/useAuth';
 
 ### Components
 
-**Pattern**: PascalCase with `.tsx` extension
+**PascalCase with `.tsx` extension:**
 
 ```
-MyComponent.tsx
-PostDataGrid.tsx
-CustomAppBar.tsx
+OrdersTable.tsx
+PaymentStatusBadge.tsx
+OrderActionButton.tsx
 ```
-
-**Avoid:**
-- camelCase: `myComponent.tsx` ❌
-- kebab-case: `my-component.tsx` ❌
-- All caps: `MYCOMPONENT.tsx` ❌
 
 ### Hooks
 
-**Pattern**: camelCase with `use` prefix, `.ts` extension
+**camelCase with `use` prefix, `.ts` extension:**
 
 ```
-useMyFeature.ts
-useSuspensePost.ts
-useAuth.ts
-useGridLayout.ts
+useSearchOrders.ts
+useUpdateOrder.ts
+useOrderFilters.ts
 ```
 
-### API Services
+### Server Actions
 
-**Pattern**: camelCase with `Api` suffix, `.ts` extension
-
-```
-myFeatureApi.ts
-postApi.ts
-userApi.ts
-```
-
-### Helpers/Utilities
-
-**Pattern**: camelCase with descriptive name, `.ts` extension
+**camelCase with `.ts` extension:**
 
 ```
-myFeatureHelpers.ts
-validation.ts
-transblogers.ts
-constants.ts
+orders.ts
+customers.ts
+auth.ts
+```
+
+### Utilities
+
+**camelCase with `.ts` extension:**
+
+```
+utils.ts
+validations.ts
+helpers.ts
 ```
 
 ### Types
 
-**Pattern**: camelCase, `index.ts` or descriptive name
+**camelCase, `.ts` extension:**
 
 ```
-types/index.ts
-types/post.ts
-types/user.ts
+order.ts
+customer.ts
+index.ts
 ```
 
 ---
 
-## When to Create a New Feature
+## Complete Feature Example
 
-### Create New Feature When:
+### Example: Orders Feature
 
-- Multiple related components (>3)
-- Has own API endpoints
-- Domain-specific logic
-- Will grow over time
-- Reused across multiple routes
+**Full structure:**
 
-**Example:** `features/posts/`
-- 20+ components
-- Own API service
-- Complex state management
-- Used in multiple routes
+```
+project-root/
+├── app/
+│   └── orders/
+│       ├── page.tsx                    # Server Component (container)
+│       ├── loading.tsx                 # Loading UI
+│       ├── error.tsx                   # Error UI
+│       └── [id]/
+│           └── page.tsx                # Order detail page
+│
+├── actions/
+│   └── orders.ts                       # Server actions (fetch + mutations)
+│
+├── features/
+│   └── orders/
+│       ├── components/
+│       │   ├── OrdersTable.tsx         # Main table (Client)
+│       │   ├── OrdersSearch.tsx        # Search component (Client)
+│       │   ├── OrderCard.tsx           # Card component
+│       │   └── badges/
+│       │       └── OrderPaymentBadge.tsx
+│       └── hooks/
+│           ├── useSearchOrders.ts      # Search hook
+│           └── useUpdateOrder.ts       # Update hook
+│
+├── components/
+│   └── ui/
+│       ├── table.tsx                   # ShadCN base
+│       ├── badge.tsx
+│       └── button.tsx
+│
+├── lib/
+│   └── validations/
+│       └── order.ts                    # Zod schema
+│
+└── types/
+    └── order.ts                        # Order types
+```
 
-### Add to Existing Feature When:
+**File contents:**
 
-- Related to existing feature
-- Shares same API
-- Logically grouped
-- Extends existing functionality
-
-**Example:** Adding export dialog to posts feature
-
-### Create Reusable Component When:
-
-- Used across 3+ features
-- Generic, no domain logic
-- Pure presentation
-- Shared pattern
-
-**Example:** `components/SuspenseLoader/`
-
----
-
-## Import Organization
-
-### Import Order (Recommended)
-
+**1. app/orders/page.tsx (Server Component)**
 ```typescript
-// 1. React and React-related
-import React, { useState, useCallback, useMemo } from 'react';
-import { lazy } from 'react';
+import { getOrders } from '@/actions/orders';
+import { OrdersTable } from '@/features/orders/components/OrdersTable';
 
-// 2. Third-party libraries (alphabetical)
-import { Box, Paper, Button, Grid } from '@mui/material';
-import type { SxProps, Theme } from '@mui/material';
-import { useSuspenseQuery, useQueryClient } from '@tanstack/react-query';
-import { createFileRoute } from '@tanstack/react-router';
+export default async function OrdersPage() {
+    const orders = await getOrders();
 
-// 3. Alias imports (@ first, then ~)
-import { apiClient } from '@/lib/apiClient';
-import { useAuth } from '@/hooks/useAuth';
-import { useMuiSnackbar } from '@/hooks/useMuiSnackbar';
-import { SuspenseLoader } from '~components/SuspenseLoader';
-import { postApi } from '~features/posts/api/postApi';
-
-// 4. Type imports (grouped)
-import type { Post } from '~types/post';
-import type { User } from '~types/user';
-
-// 5. Relative imports (same feature)
-import { MySubComponent } from './MySubComponent';
-import { useMyFeature } from '../hooks/useMyFeature';
-import { myFeatureHelpers } from '../helpers/myFeatureHelpers';
+    return (
+        <div className="container mx-auto py-8">
+            <h1 className="text-3xl font-bold mb-6">Orders</h1>
+            <OrdersTable orders={orders} />
+        </div>
+    );
+}
 ```
 
-**Use single quotes** for all imports (project standard)
+**2. actions/orders.ts (Server Actions)**
+```typescript
+'use server';
+
+import { prisma } from '@/lib/db';
+import { revalidatePath } from 'next/cache';
+
+export async function getOrders() {
+    return await prisma.order.findMany({
+        include: { customer: true },
+        orderBy: { createdAt: 'desc' },
+    });
+}
+
+export async function searchOrders(query: string) {
+    return await prisma.order.findMany({
+        where: {
+            OR: [
+                { id: { contains: query, mode: 'insensitive' } },
+                { customerName: { contains: query, mode: 'insensitive' } },
+            ],
+        },
+        take: 20,
+    });
+}
+
+export async function updateOrder(id: string, status: string) {
+    await prisma.order.update({
+        where: { id },
+        data: { status },
+    });
+
+    revalidatePath('/orders');
+}
+```
+
+**3. features/orders/components/OrdersTable.tsx (Client)**
+```typescript
+'use client';
+
+import { useState } from 'react';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { OrderPaymentBadge } from './badges/OrderPaymentBadge';
+import type { Order } from '@/types/order';
+
+interface OrdersTableProps {
+    orders: Order[];
+}
+
+export function OrdersTable({ orders }: OrdersTableProps) {
+    const [selectedId, setSelectedId] = useState<string | null>(null);
+
+    return (
+        <Table>
+            <TableHeader>
+                <TableRow>
+                    <TableHead>Order ID</TableHead>
+                    <TableHead>Customer</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Amount</TableHead>
+                </TableRow>
+            </TableHeader>
+            <TableBody>
+                {orders.map((order) => (
+                    <TableRow key={order.id} onClick={() => setSelectedId(order.id)}>
+                        <TableCell>{order.id}</TableCell>
+                        <TableCell>{order.customerName}</TableCell>
+                        <TableCell>
+                            <OrderPaymentBadge status={order.paymentStatus} />
+                        </TableCell>
+                        <TableCell>${order.amount}</TableCell>
+                    </TableRow>
+                ))}
+            </TableBody>
+        </Table>
+    );
+}
+```
+
+**4. features/orders/hooks/useSearchOrders.ts**
+```typescript
+'use client';
+
+import { useState } from 'react';
+import { searchOrders } from '@/actions/orders';
+import type { Order } from '@/types/order';
+
+export function useSearchOrders() {
+    const [results, setResults] = useState<Order[]>([]);
+    const [isSearching, setIsSearching] = useState(false);
+
+    async function search(query: string) {
+        setIsSearching(true);
+        try {
+            const orders = await searchOrders(query);
+            setResults(orders);
+        } finally {
+            setIsSearching(false);
+        }
+    }
+
+    return { results, isSearching, search };
+}
+```
 
 ---
 
-## Public API Pattern
+## Directory Structure Comparison
 
-### feature/index.ts
-
-Export public API from feature for clean imports:
-
-```typescript
-// features/my-feature/index.ts
-
-// Export main components
-export { MyFeatureMain } from './components/MyFeatureMain';
-export { MyFeatureHeader } from './components/MyFeatureHeader';
-
-// Export hooks
-export { useMyFeature } from './hooks/useMyFeature';
-export { useSuspenseMyFeature } from './hooks/useSuspenseMyFeature';
-
-// Export API
-export { myFeatureApi } from './api/myFeatureApi';
-
-// Export types
-export type { MyFeatureData, MyFeatureConfig } from './types';
-```
-
-**Usage:**
-```typescript
-// ✅ Clean import from feature index
-import { MyFeatureMain, useMyFeature } from '~features/my-feature';
-
-// ❌ Avoid deep imports (but OK if needed)
-import { MyFeatureMain } from '~features/my-feature/components/MyFeatureMain';
-```
-
----
-
-## Directory Structure Visualization
+### Before (Vite + TanStack)
 
 ```
 src/
-├── features/                    # Domain-specific features
-│   ├── posts/
-│   │   ├── api/
-│   │   ├── components/
-│   │   ├── hooks/
-│   │   ├── helpers/
-│   │   ├── types/
-│   │   └── index.ts
-│   ├── blogs/
-│   └── auth/
-│
-├── components/                  # Reusable components
-│   ├── SuspenseLoader/
-│   ├── CustomAppBar/
-│   ├── ErrorBoundary/
-│   └── LoadingOverlay/
-│
-├── routes/                      # TanStack Router routes
-│   ├── __root.tsx
-│   ├── index.tsx
-│   ├── project-catalog/
-│   │   ├── index.tsx
-│   │   └── create/
-│   └── blogs/
-│
-├── hooks/                       # Shared hooks
-│   ├── useAuth.ts
-│   ├── useMuiSnackbar.ts
-│   └── useDebounce.ts
-│
-├── lib/                         # Shared utilities
-│   ├── apiClient.ts
-│   └── utils.ts
-│
-├── types/                       # Shared TypeScript types
-│   ├── user.ts
-│   ├── post.ts
-│   └── common.ts
-│
-├── config/                      # Configuration
-│   └── theme.ts
-│
-└── App.tsx                      # Root component
+├── features/
+│   └── posts/
+│       ├── api/                  # ❌ Axios API services
+│       │   └── postApi.ts
+│       ├── components/
+│       ├── hooks/
+│       │   └── useSuspensePost.ts  # ❌ TanStack Query
+│       └── queries/              # ❌ Query key factories
+│           └── postQueries.ts
+├── components/
+├── routes/                       # ❌ TanStack Router
+│   └── posts/
+│       └── index.tsx
+└── lib/
+    └── apiClient.ts              # ❌ Axios instance
+```
+
+### After (Next.js 15)
+
+```
+app/
+├── orders/                       # ✅ Next.js routes
+│   ├── page.tsx
+│   └── loading.tsx
+├── actions/                      # ✅ Server Actions
+│   └── orders.ts
+├── features/
+│   └── orders/
+│       ├── components/           # ✅ Client components
+│       └── hooks/                # ✅ Client hooks
+│           └── useSearchOrders.ts
+├── components/
+│   └── ui/                       # ✅ ShadCN
+└── lib/
+    └── db.ts                     # ✅ Prisma client
 ```
 
 ---
 
-## Summary
+## Best Practices Summary
 
-**Key Principles:**
-1. **features/** for domain-specific code
-2. **components/** for truly reusable UI
-3. Use subdirectories: api/, components/, hooks/, helpers/, types/
-4. Import aliases for clean imports (@/, ~types, ~components, ~features)
-5. Consistent naming: PascalCase components, camelCase utilities
-6. Export public API from feature index.ts
+**Directory Organization:**
+1. **app/** - Routes only (page.tsx, layout.tsx, etc.)
+2. **actions/** - All server-side logic (fetch + mutations)
+3. **features/** - Domain components (start here)
+4. **components/** - Shared components (3+ uses)
+5. **lib/** - Utilities, Prisma client, validations
+6. **types/** - Shared TypeScript types
+
+**File Naming:**
+- Components: PascalCase.tsx
+- Hooks: camelCase.ts with `use` prefix
+- Actions: camelCase.ts (domain name)
+- Types: camelCase.ts
+
+**Import Alias:**
+- Use `@/` for all imports
+- Consistent, simple, Next.js convention
+
+**Component Location:**
+- Start in features/
+- Move to components/ at 3+ uses
+- ShadCN base stays in components/ui/
 
 **See Also:**
-- [component-patterns.md](component-patterns.md) - Component structure
-- [data-fetching.md](data-fetching.md) - API service patterns
-- [complete-examples.md](complete-examples.md) - Full feature example
+- [component-patterns.md](component-patterns.md) - Server/Client patterns
+- [data-fetching.md](data-fetching.md) - Server Actions usage
+- [shadcn-patterns.md](shadcn-patterns.md) - Wrapper patterns
+- [complete-examples.md](complete-examples.md) - Full examples

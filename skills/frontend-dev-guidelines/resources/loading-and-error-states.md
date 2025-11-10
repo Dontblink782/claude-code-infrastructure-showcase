@@ -1,501 +1,671 @@
 # Loading & Error States
 
-**CRITICAL**: Proper loading and error state handling prevents layout shift and provides better user experience.
+Modern loading and error handling patterns for Next.js 15 App Router. Learn loading.tsx convention, Suspense streaming, error boundaries, and skeleton states.
 
 ---
 
-## ⚠️ CRITICAL RULE: Never Use Early Returns
+## Next.js 15 Loading Patterns
 
-### The Problem
+### loading.tsx File Convention
 
-```typescript
-// ❌ NEVER DO THIS - Early return with loading spinner
-const Component = () => {
-    const { data, isLoading } = useQuery();
-
-    // WRONG: This causes layout shift and poor UX
-    if (isLoading) {
-        return <LoadingSpinner />;
-    }
-
-    return <Content data={data} />;
-};
-```
-
-**Why this is bad:**
-1. **Layout Shift**: Content position jumps when loading completes
-2. **CLS (Cumulative Layout Shift)**: Poor Core Web Vital score
-3. **Jarring UX**: Page structure changes suddenly
-4. **Lost Scroll Position**: User loses place on page
-
-### The Solutions
-
-**Option 1: SuspenseLoader (PREFERRED for new components)**
+**Automatic loading UI** - Next.js wraps your page in Suspense automatically.
 
 ```typescript
-import { SuspenseLoader } from '~components/SuspenseLoader';
+// app/orders/loading.tsx
+import { Skeleton } from '@/components/ui/skeleton';
 
-const HeavyComponent = React.lazy(() => import('./HeavyComponent'));
-
-export const MyComponent: React.FC = () => {
+export default function OrdersLoading() {
     return (
-        <SuspenseLoader>
-            <HeavyComponent />
-        </SuspenseLoader>
+        <div className="container py-8 space-y-4">
+            <Skeleton className="h-8 w-48" /> {/* Page title */}
+            <Skeleton className="h-12 w-full" /> {/* Search bar */}
+            <Skeleton className="h-96 w-full" /> {/* Table */}
+        </div>
     );
-};
+}
+
+// app/orders/page.tsx
+export default async function OrdersPage() {
+    const orders = await getOrders(); // Suspends while fetching
+    return <OrdersList orders={orders} />;
+}
 ```
 
-**Option 2: LoadingOverlay (for legacy useQuery patterns)**
-
-```typescript
-import { LoadingOverlay } from '~components/LoadingOverlay';
-
-export const MyComponent: React.FC = () => {
-    const { data, isLoading } = useQuery({ ... });
-
-    return (
-        <LoadingOverlay loading={isLoading}>
-            <Content data={data} />
-        </LoadingOverlay>
-    );
-};
-```
+**What happens:**
+1. User navigates to `/orders`
+2. `loading.tsx` renders immediately
+3. `page.tsx` async function runs
+4. Once resolved, `page.tsx` replaces `loading.tsx`
+5. **No layout shift** - loading UI reserves space
 
 ---
 
-## SuspenseLoader Component
+## Suspense Boundaries
 
-### What It Does
+### Manual Suspense for Streaming
 
-- Shows loading indicator while lazy components load
-- Smooth fade-in animation
-- Prevents layout shift
-- Consistent loading experience across app
-
-### Import
+**Stream independent sections** as they become ready:
 
 ```typescript
-import { SuspenseLoader } from '~components/SuspenseLoader';
-// Or
-import { SuspenseLoader } from '@/components/SuspenseLoader';
-```
+// app/dashboard/page.tsx
+import { Suspense } from 'react';
+import { Skeleton } from '@/components/ui/skeleton';
 
-### Basic Usage
-
-```typescript
-<SuspenseLoader>
-    <LazyLoadedComponent />
-</SuspenseLoader>
-```
-
-### With useSuspenseQuery
-
-```typescript
-import { useSuspenseQuery } from '@tanstack/react-query';
-import { SuspenseLoader } from '~components/SuspenseLoader';
-
-const Inner: React.FC = () => {
-    // No isLoading needed!
-    const { data } = useSuspenseQuery({
-        queryKey: ['data'],
-        queryFn: () => api.getData(),
-    });
-
-    return <Display data={data} />;
-};
-
-// Outer component wraps in Suspense
-export const Outer: React.FC = () => {
+export default function DashboardPage() {
     return (
-        <SuspenseLoader>
-            <Inner />
-        </SuspenseLoader>
+        <div className="container py-8">
+            <h1 className="text-3xl font-bold mb-6">Dashboard</h1>
+
+            <div className="grid grid-cols-3 gap-4">
+                {/* Stats load fast - show first */}
+                <Suspense fallback={<Skeleton className="h-32" />}>
+                    <StatsSection />
+                </Suspense>
+
+                {/* Orders load medium speed */}
+                <Suspense fallback={<Skeleton className="h-64" />}>
+                    <RecentOrdersSection />
+                </Suspense>
+
+                {/* Analytics slow - but doesn't block other sections */}
+                <Suspense fallback={<Skeleton className="h-64" />}>
+                    <AnalyticsSection />
+                </Suspense>
+            </div>
+        </div>
     );
-};
-```
+}
 
-### Multiple Suspense Boundaries
+// Each section is async Server Component
+async function StatsSection() {
+    const stats = await getStats(); // Fast query
+    return <StatsCard data={stats} />;
+}
 
-**Pattern**: Separate loading for independent sections
+async function RecentOrdersSection() {
+    const orders = await getRecentOrders(); // Medium query
+    return <OrdersList orders={orders} />;
+}
 
-```typescript
-export const Dashboard: React.FC = () => {
-    return (
-        <Box>
-            <SuspenseLoader>
-                <Header />
-            </SuspenseLoader>
-
-            <SuspenseLoader>
-                <MainContent />
-            </SuspenseLoader>
-
-            <SuspenseLoader>
-                <Sidebar />
-            </SuspenseLoader>
-        </Box>
-    );
-};
+async function AnalyticsSection() {
+    const analytics = await getAnalytics(); // Slow query
+    return <AnalyticsChart data={analytics} />;
+}
 ```
 
 **Benefits:**
-- Each section loads independently
-- User sees partial content sooner
-- Better perceived performance
-
-### Nested Suspense
-
-```typescript
-export const ParentComponent: React.FC = () => {
-    return (
-        <SuspenseLoader>
-            {/* Parent suspends while loading */}
-            <ParentContent>
-                <SuspenseLoader>
-                    {/* Nested suspense for child */}
-                    <ChildComponent />
-                </SuspenseLoader>
-            </ParentContent>
-        </SuspenseLoader>
-    );
-};
-```
+- **Progressive rendering** - fast sections appear first
+- **Better perceived performance** - user sees content sooner
+- **No blocking** - slow query doesn't block page
 
 ---
 
-## LoadingOverlay Component
+## Skeleton Components (ShadCN)
 
-### When to Use
-
-- Legacy components with `useQuery` (not refactored to Suspense yet)
-- Overlay loading state needed
-- Can't use Suspense boundaries
-
-### Usage
+### Basic Skeleton Usage
 
 ```typescript
-import { LoadingOverlay } from '~components/LoadingOverlay';
+import { Skeleton } from '@/components/ui/skeleton';
 
-export const MyComponent: React.FC = () => {
-    const { data, isLoading } = useQuery({
-        queryKey: ['data'],
-        queryFn: () => api.getData(),
-    });
-
+export function OrderCardSkeleton() {
     return (
-        <LoadingOverlay loading={isLoading}>
-            <Box sx={{ p: 2 }}>
-                {data && <Content data={data} />}
-            </Box>
-        </LoadingOverlay>
+        <div className="rounded-lg border bg-card p-6 space-y-3">
+            <Skeleton className="h-4 w-24" /> {/* Order number */}
+            <Skeleton className="h-8 w-full" /> {/* Customer name */}
+            <div className="flex gap-2">
+                <Skeleton className="h-4 w-20" /> {/* Status badge */}
+                <Skeleton className="h-4 w-20" /> {/* Date */}
+            </div>
+            <Skeleton className="h-10 w-full" /> {/* Amount */}
+        </div>
     );
-};
+}
 ```
 
-**What it does:**
-- Shows semi-transparent overlay with spinner
-- Content area reserved (no layout shift)
-- Prevents interaction while loading
+### Reusable Skeleton Patterns
+
+```typescript
+// components/skeletons/table-skeleton.tsx
+export function TableSkeleton({ rows = 5 }: { rows?: number }) {
+    return (
+        <div className="space-y-2">
+            {/* Header */}
+            <div className="flex gap-4 border-b pb-2">
+                <Skeleton className="h-4 w-32" />
+                <Skeleton className="h-4 w-48" />
+                <Skeleton className="h-4 w-24" />
+            </div>
+
+            {/* Rows */}
+            {Array.from({ length: rows }).map((_, i) => (
+                <div key={i} className="flex gap-4 py-2">
+                    <Skeleton className="h-4 w-32" />
+                    <Skeleton className="h-4 w-48" />
+                    <Skeleton className="h-4 w-24" />
+                </div>
+            ))}
+        </div>
+    );
+}
+
+// Usage
+<Suspense fallback={<TableSkeleton rows={10} />}>
+    <OrdersTable />
+</Suspense>
+```
+
+### Card Grid Skeleton
+
+```typescript
+export function CardGridSkeleton({ count = 6 }: { count?: number }) {
+    return (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {Array.from({ length: count }).map((_, i) => (
+                <div key={i} className="rounded-lg border bg-card p-6 space-y-3">
+                    <Skeleton className="h-6 w-3/4" />
+                    <Skeleton className="h-4 w-full" />
+                    <Skeleton className="h-4 w-full" />
+                    <Skeleton className="h-10 w-24" />
+                </div>
+            ))}
+        </div>
+    );
+}
+```
 
 ---
 
 ## Error Handling
 
-### useMuiSnackbar Hook (REQUIRED)
+### error.tsx File Convention
 
-**NEVER use react-toastify** - Project standard is MUI Snackbar
+**Automatic error boundaries** for every route:
 
 ```typescript
-import { useMuiSnackbar } from '@/hooks/useMuiSnackbar';
+// app/orders/error.tsx
+'use client'; // Error components MUST be Client Components
 
-export const MyComponent: React.FC = () => {
-    const { showSuccess, showError, showInfo, showWarning } = useMuiSnackbar();
+import { useEffect } from 'react';
+import { Button } from '@/components/ui/button';
+import { AlertCircle } from 'lucide-react';
 
-    const handleAction = async () => {
-        try {
-            await api.doSomething();
-            showSuccess('Operation completed successfully');
-        } catch (error) {
-            showError('Operation failed');
-        }
-    };
+export default function OrdersError({
+    error,
+    reset,
+}: {
+    error: Error & { digest?: string };
+    reset: () => void;
+}) {
+    useEffect(() => {
+        // Log error to error reporting service
+        console.error('Orders page error:', error);
+    }, [error]);
 
-    return <Button onClick={handleAction}>Do Action</Button>;
-};
+    return (
+        <div className="flex flex-col items-center justify-center min-h-screen p-4">
+            <AlertCircle className="h-12 w-12 text-red-500 mb-4" />
+            <h2 className="text-2xl font-bold mb-2">Something went wrong!</h2>
+            <p className="text-muted-foreground mb-4">
+                {error.message || 'An unexpected error occurred'}
+            </p>
+            <Button onClick={reset}>Try again</Button>
+        </div>
+    );
+}
 ```
 
-**Available Methods:**
-- `showSuccess(message)` - Green success message
-- `showError(message)` - Red error message
-- `showWarning(message)` - Orange warning message
-- `showInfo(message)` - Blue info message
+**What triggers error.tsx:**
+- Errors in `page.tsx` Server Component
+- Errors in nested Server Components
+- Errors during data fetching
 
-### TanStack Query Error Callbacks
+### global-error.tsx (Root Error Boundary)
 
 ```typescript
-import { useSuspenseQuery } from '@tanstack/react-query';
-import { useMuiSnackbar } from '@/hooks/useMuiSnackbar';
+// app/global-error.tsx
+'use client';
 
-export const MyComponent: React.FC = () => {
-    const { showError } = useMuiSnackbar();
+export default function GlobalError({
+    error,
+    reset,
+}: {
+    error: Error & { digest?: string };
+    reset: () => void;
+}) {
+    return (
+        <html>
+            <body>
+                <div className="flex flex-col items-center justify-center min-h-screen">
+                    <h2 className="text-2xl font-bold">Application Error</h2>
+                    <p className="text-muted-foreground">{error.message}</p>
+                    <button onClick={reset}>Try again</button>
+                </div>
+            </body>
+        </html>
+    );
+}
+```
 
-    const { data } = useSuspenseQuery({
-        queryKey: ['data'],
-        queryFn: () => api.getData(),
+**Use case:** Catches errors in root layout.tsx
 
-        // Handle errors
-        onError: (error) => {
-            showError('Failed to load data');
-            console.error('Query error:', error);
-        },
+---
+
+## not-found.tsx (404 Handling)
+
+### Route-Specific 404
+
+```typescript
+// app/orders/[id]/not-found.tsx
+import { Button } from '@/components/ui/button';
+import Link from 'next/link';
+import { FileQuestion } from 'lucide-react';
+
+export default function OrderNotFound() {
+    return (
+        <div className="flex flex-col items-center justify-center min-h-screen">
+            <FileQuestion className="h-16 w-16 text-muted-foreground mb-4" />
+            <h2 className="text-2xl font-bold mb-2">Order Not Found</h2>
+            <p className="text-muted-foreground mb-4">
+                The order you're looking for doesn't exist or has been removed.
+            </p>
+            <Button asChild>
+                <Link href="/orders">Back to Orders</Link>
+            </Button>
+        </div>
+    );
+}
+```
+
+### Trigger notFound()
+
+```typescript
+// app/orders/[id]/page.tsx
+import { notFound } from 'next/navigation';
+
+export default async function OrderPage({ params }: { params: { id: string } }) {
+    const order = await prisma.order.findUnique({
+        where: { id: params.id },
     });
 
-    return <Content data={data} />;
-};
+    if (!order) {
+        notFound(); // Triggers not-found.tsx
+    }
+
+    return <OrderDetails order={order} />;
+}
 ```
 
-### Error Boundaries
+---
+
+## Toast Notifications (Sonner)
+
+### Setup Sonner
 
 ```typescript
-import { ErrorBoundary } from 'react-error-boundary';
+// app/layout.tsx
+import { Toaster } from 'sonner';
 
-function ErrorFallback({ error, resetErrorBoundary }) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
     return (
-        <Box sx={{ p: 4, textAlign: 'center' }}>
-            <Typography variant='h5' color='error'>
-                Something went wrong
-            </Typography>
-            <Typography>{error.message}</Typography>
-            <Button onClick={resetErrorBoundary}>Try Again</Button>
-        </Box>
+        <html>
+            <body>
+                {children}
+                <Toaster />
+            </body>
+        </html>
+    );
+}
+```
+
+### Using toast in Client Components
+
+```typescript
+'use client';
+
+import { useState, useTransition } from 'react';
+import { toast } from 'sonner';
+import { Button } from '@/components/ui/button';
+import { deleteOrder } from '@/actions/order-actions';
+
+export function DeleteOrderButton({ orderId }: { orderId: string }) {
+    const [isPending, startTransition] = useTransition();
+
+    function handleDelete() {
+        startTransition(async () => {
+            const result = await deleteOrder(orderId);
+
+            if (result.success) {
+                toast.success('Order deleted successfully');
+            } else {
+                toast.error(result.errors?._form?.[0] || 'Failed to delete order');
+            }
+        });
+    }
+
+    return (
+        <Button
+            onClick={handleDelete}
+            disabled={isPending}
+            variant="destructive"
+        >
+            {isPending ? 'Deleting...' : 'Delete'}
+        </Button>
+    );
+}
+```
+
+### Toast Variants
+
+```typescript
+import { toast } from 'sonner';
+
+// Success
+toast.success('Order created successfully');
+
+// Error
+toast.error('Failed to create order');
+
+// Info
+toast.info('Order is being processed');
+
+// Warning
+toast.warning('Low stock remaining');
+
+// Loading (with promise)
+toast.promise(
+    createOrder(formData),
+    {
+        loading: 'Creating order...',
+        success: 'Order created!',
+        error: 'Failed to create order',
+    }
+);
+
+// Custom action
+toast('Order updated', {
+    action: {
+        label: 'Undo',
+        onClick: () => undoUpdate(),
+    },
+});
+```
+
+---
+
+## Client-Side Loading States
+
+### useTransition for Mutations
+
+```typescript
+'use client';
+
+import { useTransition } from 'react';
+import { Button } from '@/components/ui/button';
+import { updateOrderStatus } from '@/actions/order-actions';
+
+export function OrderActions({ orderId }: { orderId: string }) {
+    const [isPending, startTransition] = useTransition();
+
+    function handleComplete() {
+        startTransition(async () => {
+            await updateOrderStatus(orderId, 'completed');
+        });
+    }
+
+    return (
+        <Button
+            onClick={handleComplete}
+            disabled={isPending}
+        >
+            {isPending ? 'Updating...' : 'Mark Complete'}
+        </Button>
+    );
+}
+```
+
+### Loading Spinner Component
+
+```typescript
+import { Loader2 } from 'lucide-react';
+
+export function LoadingSpinner({ size = 'default' }: { size?: 'sm' | 'default' | 'lg' }) {
+    const sizeClasses = {
+        sm: 'h-4 w-4',
+        default: 'h-8 w-8',
+        lg: 'h-12 w-12',
+    };
+
+    return (
+        <Loader2 className={`animate-spin text-muted-foreground ${sizeClasses[size]}`} />
     );
 }
 
-export const MyPage: React.FC = () => {
-    return (
-        <ErrorBoundary
-            FallbackComponent={ErrorFallback}
-            onError={(error) => console.error('Boundary caught:', error)}
-        >
-            <SuspenseLoader>
-                <ComponentThatMightError />
-            </SuspenseLoader>
-        </ErrorBoundary>
-    );
-};
+// Usage
+<LoadingSpinner size="sm" />
 ```
 
 ---
 
 ## Complete Examples
 
-### Example 1: Modern Component with Suspense
+### Example 1: Page with loading.tsx
 
 ```typescript
-import React from 'react';
-import { Box, Paper } from '@mui/material';
-import { useSuspenseQuery } from '@tanstack/react-query';
-import { SuspenseLoader } from '~components/SuspenseLoader';
-import { myFeatureApi } from '../api/myFeatureApi';
+// app/orders/loading.tsx
+import { Skeleton } from '@/components/ui/skeleton';
 
-// Inner component uses useSuspenseQuery
-const InnerComponent: React.FC<{ id: number }> = ({ id }) => {
-    const { data } = useSuspenseQuery({
-        queryKey: ['entity', id],
-        queryFn: () => myFeatureApi.getEntity(id),
-    });
-
-    // data is always defined - no isLoading needed!
+export default function OrdersLoading() {
     return (
-        <Paper sx={{ p: 2 }}>
-            <h2>{data.title}</h2>
-            <p>{data.description}</p>
-        </Paper>
-    );
-};
-
-// Outer component provides Suspense boundary
-export const OuterComponent: React.FC<{ id: number }> = ({ id }) => {
-    return (
-        <Box>
-            <SuspenseLoader>
-                <InnerComponent id={id} />
-            </SuspenseLoader>
-        </Box>
-    );
-};
-
-export default OuterComponent;
-```
-
-### Example 2: Legacy Pattern with LoadingOverlay
-
-```typescript
-import React from 'react';
-import { Box } from '@mui/material';
-import { useQuery } from '@tanstack/react-query';
-import { LoadingOverlay } from '~components/LoadingOverlay';
-import { myFeatureApi } from '../api/myFeatureApi';
-
-export const LegacyComponent: React.FC<{ id: number }> = ({ id }) => {
-    const { data, isLoading, error } = useQuery({
-        queryKey: ['entity', id],
-        queryFn: () => myFeatureApi.getEntity(id),
-    });
-
-    return (
-        <LoadingOverlay loading={isLoading}>
-            <Box sx={{ p: 2 }}>
-                {error && <ErrorDisplay error={error} />}
-                {data && <Content data={data} />}
-            </Box>
-        </LoadingOverlay>
-    );
-};
-```
-
-### Example 3: Error Handling with Snackbar
-
-```typescript
-import React from 'react';
-import { useSuspenseQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Button } from '@mui/material';
-import { useMuiSnackbar } from '@/hooks/useMuiSnackbar';
-import { myFeatureApi } from '../api/myFeatureApi';
-
-export const EntityEditor: React.FC<{ id: number }> = ({ id }) => {
-    const queryClient = useQueryClient();
-    const { showSuccess, showError } = useMuiSnackbar();
-
-    const { data } = useSuspenseQuery({
-        queryKey: ['entity', id],
-        queryFn: () => myFeatureApi.getEntity(id),
-        onError: () => {
-            showError('Failed to load entity');
-        },
-    });
-
-    const updateMutation = useMutation({
-        mutationFn: (updates) => myFeatureApi.update(id, updates),
-
-        onSuccess: () => {
-            queryClient.invalidateQueries({ queryKey: ['entity', id] });
-            showSuccess('Entity updated successfully');
-        },
-
-        onError: () => {
-            showError('Failed to update entity');
-        },
-    });
-
-    return (
-        <Button onClick={() => updateMutation.mutate({ name: 'New' })}>
-            Update
-        </Button>
-    );
-};
-```
-
----
-
-## Loading State Anti-Patterns
-
-### ❌ What NOT to Do
-
-```typescript
-// ❌ NEVER - Early return
-if (isLoading) {
-    return <CircularProgress />;
-}
-
-// ❌ NEVER - Conditional rendering
-{isLoading ? <Spinner /> : <Content />}
-
-// ❌ NEVER - Layout changes
-if (isLoading) {
-    return (
-        <Box sx={{ height: 100 }}>
-            <Spinner />
-        </Box>
+        <div className="container py-8 space-y-4">
+            <Skeleton className="h-8 w-48" />
+            <div className="flex gap-2">
+                <Skeleton className="h-10 w-64" />
+                <Skeleton className="h-10 w-32" />
+            </div>
+            <Skeleton className="h-96 w-full" />
+        </div>
     );
 }
-return (
-    <Box sx={{ height: 500 }}>  // Different height!
-        <Content />
-    </Box>
-);
-```
 
-### ✅ What TO Do
-
-```typescript
-// ✅ BEST - useSuspenseQuery + SuspenseLoader
-<SuspenseLoader>
-    <ComponentWithSuspenseQuery />
-</SuspenseLoader>
-
-// ✅ ACCEPTABLE - LoadingOverlay
-<LoadingOverlay loading={isLoading}>
-    <Content />
-</LoadingOverlay>
-
-// ✅ OK - Inline skeleton with same layout
-<Box sx={{ height: 500 }}>
-    {isLoading ? <Skeleton variant='rectangular' height='100%' /> : <Content />}
-</Box>
-```
-
----
-
-## Skeleton Loading (Alternative)
-
-### MUI Skeleton Component
-
-```typescript
-import { Skeleton, Box } from '@mui/material';
-
-export const MyComponent: React.FC = () => {
-    const { data, isLoading } = useQuery({ ... });
+// app/orders/page.tsx
+export default async function OrdersPage() {
+    const orders = await prisma.order.findMany();
 
     return (
-        <Box sx={{ p: 2 }}>
-            {isLoading ? (
-                <>
-                    <Skeleton variant='text' width={200} height={40} />
-                    <Skeleton variant='rectangular' width='100%' height={200} />
-                    <Skeleton variant='text' width='100%' />
-                </>
-            ) : (
-                <>
-                    <Typography variant='h5'>{data.title}</Typography>
-                    <img src={data.image} />
-                    <Typography>{data.description}</Typography>
-                </>
+        <div className="container py-8">
+            <h1 className="text-3xl font-bold mb-6">Orders</h1>
+            <OrdersFilter />
+            <OrdersTable orders={orders} />
+        </div>
+    );
+}
+```
+
+### Example 2: Streaming with Suspense
+
+```typescript
+// app/dashboard/page.tsx
+import { Suspense } from 'react';
+import { CardGridSkeleton } from '@/components/skeletons/card-grid-skeleton';
+
+export default function DashboardPage() {
+    return (
+        <div className="container py-8 space-y-8">
+            <h1 className="text-3xl font-bold">Dashboard</h1>
+
+            {/* Stats load first */}
+            <Suspense fallback={<CardGridSkeleton count={3} />}>
+                <StatsCards />
+            </Suspense>
+
+            {/* Recent orders */}
+            <Suspense fallback={<TableSkeleton />}>
+                <RecentOrders />
+            </Suspense>
+        </div>
+    );
+}
+
+async function StatsCards() {
+    const stats = await getStats();
+    return <StatsDisplay stats={stats} />;
+}
+
+async function RecentOrders() {
+    const orders = await getRecentOrders();
+    return <OrdersTable orders={orders} />;
+}
+```
+
+### Example 3: Error Handling with Toast
+
+```typescript
+// features/orders/components/create-order-form.tsx
+'use client';
+
+import { useState, useTransition } from 'react';
+import { toast } from 'sonner';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { createOrder } from '@/actions/order-actions';
+
+export function CreateOrderForm() {
+    const [isPending, startTransition] = useTransition();
+    const [errors, setErrors] = useState<Record<string, string[]>>({});
+
+    async function handleSubmit(formData: FormData) {
+        startTransition(async () => {
+            const result = await createOrder(formData);
+
+            if (result.success) {
+                toast.success('Order created successfully');
+                setErrors({});
+            } else if (result.errors) {
+                setErrors(result.errors);
+                toast.error('Failed to create order');
+            }
+        });
+    }
+
+    return (
+        <form action={handleSubmit} className="space-y-4">
+            <Input name="customerId" placeholder="Customer ID" />
+            {errors.customerId && (
+                <p className="text-sm text-red-500">{errors.customerId[0]}</p>
             )}
-        </Box>
+
+            <Input name="amount" type="number" placeholder="Amount" />
+            {errors.amount && (
+                <p className="text-sm text-red-500">{errors.amount[0]}</p>
+            )}
+
+            <Button type="submit" disabled={isPending}>
+                {isPending ? 'Creating...' : 'Create Order'}
+            </Button>
+        </form>
     );
-};
+}
 ```
 
-**Key**: Skeleton must have **same layout** as actual content (no shift)
+---
+
+## Best Practices
+
+### DO:
+
+**✅ Use loading.tsx for automatic loading UI**
+```typescript
+// app/orders/loading.tsx
+export default function Loading() {
+    return <OrdersSkeleton />;
+}
+```
+
+**✅ Use Suspense for progressive rendering**
+```typescript
+<Suspense fallback={<Skeleton />}>
+    <SlowComponent />
+</Suspense>
+```
+
+**✅ Match skeleton layout to actual content**
+```typescript
+// Same structure - no layout shift
+{isLoading ? (
+    <Skeleton className="h-64 w-full" />
+) : (
+    <div className="h-64 w-full">Content</div>
+)}
+```
+
+**✅ Use toast for user feedback**
+```typescript
+toast.success('Action completed');
+toast.error('Action failed');
+```
+
+### DON'T:
+
+**❌ Don't use early returns with loading states**
+```typescript
+// ❌ BAD - causes layout shift
+if (isLoading) {
+    return <Spinner />;
+}
+return <Content />;
+```
+
+**❌ Don't change layout between loading and loaded**
+```typescript
+// ❌ BAD - different heights
+{isLoading ? (
+    <div className="h-32">Loading</div>
+) : (
+    <div className="h-64">Content</div>
+)}
+```
+
+**❌ Don't block entire page for slow sections**
+```typescript
+// ❌ BAD - everything waits for slow query
+const [stats, analytics, reports] = await Promise.all([
+    getStats(),      // Fast
+    getAnalytics(),  // SLOW - blocks everything!
+    getReports(),    // Fast
+]);
+
+// ✅ GOOD - slow section streams separately
+<Suspense fallback={<Skeleton />}>
+    <AnalyticsSection /> {/* Loads independently */}
+</Suspense>
+```
 
 ---
 
 ## Summary
 
-**Loading States:**
-- ✅ **PREFERRED**: SuspenseLoader + useSuspenseQuery (modern pattern)
-- ✅ **ACCEPTABLE**: LoadingOverlay (legacy pattern)
-- ✅ **OK**: Skeleton with same layout
-- ❌ **NEVER**: Early returns or conditional layout
+**Loading Patterns:**
+1. **loading.tsx** - Automatic loading UI for entire page
+2. **Suspense boundaries** - Stream independent sections
+3. **Skeleton components** - Match actual content layout
+4. **useTransition** - Client-side mutation loading states
 
 **Error Handling:**
-- ✅ **ALWAYS**: useMuiSnackbar for user feedback
-- ❌ **NEVER**: react-toastify
-- ✅ Use onError callbacks in queries/mutations
-- ✅ Error boundaries for component-level errors
+1. **error.tsx** - Automatic error boundary for routes
+2. **not-found.tsx** - Custom 404 pages
+3. **global-error.tsx** - Root-level errors
+4. **Toast (Sonner)** - User feedback for actions
+
+**Key Principles:**
+- ✅ No layout shift (reserve space with skeletons)
+- ✅ Progressive rendering (show fast content first)
+- ✅ Independent sections (Suspense boundaries)
+- ✅ User feedback (toast notifications)
+- ❌ Avoid early returns
+- ❌ Avoid blocking entire page
 
 **See Also:**
-- [component-patterns.md](component-patterns.md) - Suspense integration
-- [data-fetching.md](data-fetching.md) - useSuspenseQuery details
+- [server-components.md](server-components.md) - Suspense and streaming
+- [data-fetching.md](data-fetching.md) - Data loading patterns
+- [component-patterns.md](component-patterns.md) - Server/Client components
+- [complete-examples.md](complete-examples.md) - Full examples

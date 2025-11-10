@@ -1,749 +1,921 @@
 # Data Fetching Patterns
 
-Modern data fetching using TanStack Query with Suspense boundaries, cache-first strategies, and centralized API services.
+Modern Next.js 15 App Router data fetching using Server Components, Server Actions, and client-side hooks for mutations. Eliminate API routes in favor of direct database access and Server Actions.
 
 ---
 
-## PRIMARY PATTERN: useSuspenseQuery
+## Primary Pattern: Server Components
 
-### Why useSuspenseQuery?
+### Server-Side Data Fetching (Default)
 
-For **all new components**, use `useSuspenseQuery` instead of regular `useQuery`:
+**Next.js 15 App Router makes Server Components the default data fetching pattern.** Fetch data directly in async Server Components - no API routes needed.
 
-**Benefits:**
-- No `isLoading` checks needed
-- Integrates with Suspense boundaries
-- Cleaner component code
-- Consistent loading UX
-- Better error handling with error boundaries
-
-### Basic Pattern
+**Basic Pattern:**
 
 ```typescript
-import { useSuspenseQuery } from '@tanstack/react-query';
-import { myFeatureApi } from '../api/myFeatureApi';
+// app/orders/page.tsx
+import { prisma } from '@/lib/db';
+import { OrdersTable } from '@/features/orders/components/OrdersTable';
 
-export const MyComponent: React.FC<Props> = ({ id }) => {
-    // No isLoading - Suspense handles it!
-    const { data } = useSuspenseQuery({
-        queryKey: ['myEntity', id],
-        queryFn: () => myFeatureApi.getEntity(id),
+export default async function OrdersPage() {
+    // Direct database access in Server Component
+    const orders = await prisma.order.findMany({
+        where: { status: 'active' },
+        include: { customer: true },
+        orderBy: { createdAt: 'desc' },
     });
 
-    // data is ALWAYS defined here (not undefined | Data)
-    return <div>{data.name}</div>;
-};
-
-// Wrap in Suspense boundary
-<SuspenseLoader>
-    <MyComponent id={123} />
-</SuspenseLoader>
-```
-
-### useSuspenseQuery vs useQuery
-
-| Feature | useSuspenseQuery | useQuery |
-|---------|------------------|----------|
-| Loading state | Handled by Suspense | Manual `isLoading` check |
-| Data type | Always defined | `Data \| undefined` |
-| Use with | Suspense boundaries | Traditional components |
-| Recommended for | **NEW components** | Legacy code only |
-| Error handling | Error boundaries | Manual error state |
-
-**When to use regular useQuery:**
-- Maintaining legacy code
-- Very simple cases without Suspense
-- Polling with background updates
-
-**For new components: Always prefer useSuspenseQuery**
-
----
-
-## Cache-First Strategy
-
-### Cache-First Pattern Example
-
-**Smart caching** reduces API calls by checking React Query cache first:
-
-```typescript
-import { useSuspenseQuery, useQueryClient } from '@tanstack/react-query';
-import { postApi } from '../api/postApi';
-
-export function useSuspensePost(postId: number) {
-    const queryClient = useQueryClient();
-
-    return useSuspenseQuery({
-        queryKey: ['post', postId],
-        queryFn: async () => {
-            // Strategy 1: Try to get from list cache first
-            const cachedListData = queryClient.getQueryData<{ posts: Post[] }>([
-                'posts',
-                'list'
-            ]);
-
-            if (cachedListData?.posts) {
-                const cachedPost = cachedListData.posts.find(
-                    (post) => post.id === postId
-                );
-
-                if (cachedPost) {
-                    return cachedPost;  // Return from cache!
-                }
-            }
-
-            // Strategy 2: Not in cache, fetch from API
-            return postApi.getPost(postId);
-        },
-        staleTime: 5 * 60 * 1000,      // Consider fresh for 5 minutes
-        gcTime: 10 * 60 * 1000,         // Keep in cache for 10 minutes
-        refetchOnWindowFocus: false,    // Don't refetch on focus
-    });
+    return (
+        <div className="container">
+            <h1>Active Orders</h1>
+            <OrdersTable orders={orders} />
+        </div>
+    );
 }
 ```
 
 **Key Points:**
-- Check grid/list cache before API call
-- Avoids redundant requests
-- `staleTime`: How long data is considered fresh
-- `gcTime`: How long unused data stays in cache
-- `refetchOnWindowFocus: false`: User preference
+- Component is `async` function
+- Fetch directly from database (Prisma)
+- No API route needed
+- Data passed as props to Client Components
+- Automatic request deduplication
 
 ---
 
-## Parallel Data Fetching
+### Server Actions for Data Fetching
 
-### useSuspenseQueries
-
-When fetching multiple independent resources:
+**Alternative pattern** - Create reusable server actions for data fetching:
 
 ```typescript
-import { useSuspenseQueries } from '@tanstack/react-query';
+// actions/orders.ts
+'use server';
 
-export const MyComponent: React.FC = () => {
-    const [userQuery, settingsQuery, preferencesQuery] = useSuspenseQueries({
-        queries: [
-            {
-                queryKey: ['user'],
-                queryFn: () => userApi.getCurrentUser(),
-            },
-            {
-                queryKey: ['settings'],
-                queryFn: () => settingsApi.getSettings(),
-            },
-            {
-                queryKey: ['preferences'],
-                queryFn: () => preferencesApi.getPreferences(),
-            },
-        ],
+import { prisma } from '@/lib/db';
+
+export async function getOrders() {
+    const orders = await prisma.order.findMany({
+        where: { status: 'active' },
+        include: { customer: true },
+        orderBy: { createdAt: 'desc' },
     });
 
-    // All data available, Suspense handles loading
-    const user = userQuery.data;
-    const settings = settingsQuery.data;
-    const preferences = preferencesQuery.data;
+    return orders;
+}
 
-    return <Display user={user} settings={settings} prefs={preferences} />;
-};
+export async function getOrder(id: string) {
+    const order = await prisma.order.findUnique({
+        where: { id },
+        include: { customer: true, items: true },
+    });
+
+    if (!order) {
+        throw new Error('Order not found');
+    }
+
+    return order;
+}
+```
+
+**Usage in Server Component:**
+
+```typescript
+// app/orders/page.tsx
+import { getOrders } from '@/actions/orders';
+import { OrdersTable } from '@/features/orders/components/OrdersTable';
+
+export default async function OrdersPage() {
+    const orders = await getOrders();
+
+    return (
+        <div className="container">
+            <h1>Orders</h1>
+            <OrdersTable orders={orders} />
+        </div>
+    );
+}
+```
+
+**When to use Server Actions for fetching:**
+- Need to reuse fetch logic across multiple pages
+- Complex query logic (20+ lines)
+- Want separation of concerns
+- Testing isolation
+
+**When to fetch directly in page:**
+- Simple query (<10 lines)
+- Single use case
+- Co-located with component
+
+---
+
+### Parallel Data Fetching
+
+**Use `Promise.all()` to fetch multiple resources in parallel:**
+
+```typescript
+// app/dashboard/page.tsx
+import { getStats } from '@/actions/stats';
+import { getOrders } from '@/actions/orders';
+import { getCustomers } from '@/actions/customers';
+
+export default async function DashboardPage() {
+    // Fetch all data in parallel - total time = slowest query
+    const [stats, orders, customers] = await Promise.all([
+        getStats(),
+        getOrders({ limit: 10 }),
+        getCustomers({ limit: 10 }),
+    ]);
+
+    return (
+        <div className="grid grid-cols-3 gap-4">
+            <StatsCard data={stats} />
+            <OrdersList orders={orders} />
+            <CustomersList customers={customers} />
+        </div>
+    );
+}
 ```
 
 **Benefits:**
-- All queries in parallel
-- Single Suspense boundary
-- Type-safe results
+- Executes queries concurrently
+- Total time = slowest query (not sum of all)
+- Type-safe with array destructuring
 
 ---
 
-## Query Keys Organization
+### Streaming with Suspense
 
-### Naming Convention
-
-```typescript
-// Entity list
-['entities', blogId]
-['entities', blogId, 'summary']    // With view mode
-['entities', blogId, 'flat']
-
-// Single entity
-['entity', blogId, entityId]
-
-// Related data
-['entity', entityId, 'history']
-['entity', entityId, 'comments']
-
-// User-specific
-['user', userId, 'profile']
-['user', userId, 'permissions']
-```
-
-**Rules:**
-- Start with entity name (plural for lists, singular for one)
-- Include IDs for specificity
-- Add view mode / relationship at end
-- Consistent across app
-
-### Query Key Examples
+**For better UX, stream components independently as data arrives:**
 
 ```typescript
-// From useSuspensePost.ts
-queryKey: ['post', blogId, postId]
-queryKey: ['posts-v2', blogId, 'summary']
+// app/dashboard/page.tsx
+import { Suspense } from 'react';
+import { StatsSection } from '@/features/dashboard/components/StatsSection';
+import { OrdersSection } from '@/features/dashboard/components/OrdersSection';
+import { CustomersSection } from '@/features/dashboard/components/CustomersSection';
+import { Skeleton } from '@/components/ui/skeleton';
 
-// Invalidation patterns
-queryClient.invalidateQueries({ queryKey: ['post', blogId] });  // All posts for form
-queryClient.invalidateQueries({ queryKey: ['post'] });          // All posts
+export default function DashboardPage() {
+    return (
+        <div className="grid grid-cols-3 gap-4">
+            {/* Each section streams independently */}
+            <Suspense fallback={<Skeleton className="h-32" />}>
+                <StatsSection />
+            </Suspense>
+
+            <Suspense fallback={<Skeleton className="h-64" />}>
+                <OrdersSection />
+            </Suspense>
+
+            <Suspense fallback={<Skeleton className="h-64" />}>
+                <CustomersSection />
+            </Suspense>
+        </div>
+    );
+}
+
+// features/dashboard/components/OrdersSection.tsx
+import { getOrders } from '@/actions/orders';
+import { OrdersList } from './OrdersList';
+
+export async function OrdersSection() {
+    const orders = await getOrders({ limit: 10 });
+    return <OrdersList orders={orders} />;
+}
 ```
+
+**When to use:**
+- Independent data sources
+- Different fetch speeds
+- Better perceived performance
+- Show content as it loads
+
+**When to use Promise.all:**
+- Data needed together
+- Render at once
+- All data fast
+- Related queries
 
 ---
 
-## API Service Layer Pattern
+## fetch API with Caching
 
-### File Structure
+### Using fetch in Server Components
 
-Create centralized API service per feature:
-
-```
-features/
-  my-feature/
-    api/
-      myFeatureApi.ts    # Service layer
-```
-
-### Service Pattern (from postApi.ts)
+**For external APIs, use `fetch` with built-in caching:**
 
 ```typescript
-/**
- * Centralized API service for my-feature operations
- * Uses apiClient for consistent error handling
- */
-import apiClient from '@/lib/apiClient';
-import type { MyEntity, UpdatePayload } from '../types';
-
-export const myFeatureApi = {
-    /**
-     * Fetch a single entity
-     */
-    getEntity: async (blogId: number, entityId: number): Promise<MyEntity> => {
-        const { data } = await apiClient.get(
-            `/blog/entities/${blogId}/${entityId}`
-        );
-        return data;
-    },
-
-    /**
-     * Fetch all entities for a form
-     */
-    getEntities: async (blogId: number, view: 'summary' | 'flat'): Promise<MyEntity[]> => {
-        const { data } = await apiClient.get(
-            `/blog/entities/${blogId}`,
-            { params: { view } }
-        );
-        return data.rows;
-    },
-
-    /**
-     * Update entity
-     */
-    updateEntity: async (
-        blogId: number,
-        entityId: number,
-        payload: UpdatePayload
-    ): Promise<MyEntity> => {
-        const { data } = await apiClient.put(
-            `/blog/entities/${blogId}/${entityId}`,
-            payload
-        );
-        return data;
-    },
-
-    /**
-     * Delete entity
-     */
-    deleteEntity: async (blogId: number, entityId: number): Promise<void> => {
-        await apiClient.delete(`/blog/entities/${blogId}/${entityId}`);
-    },
-};
-```
-
-**Key Points:**
-- Export single object with methods
-- Use `apiClient` (axios instance from `@/lib/apiClient`)
-- Type-safe parameters and returns
-- JSDoc comments for each method
-- Centralized error handling (apiClient handles it)
-
----
-
-## Route Format Rules (IMPORTANT)
-
-### Correct Format
-
-```typescript
-// ✅ CORRECT - Direct service path
-await apiClient.get('/blog/posts/123');
-await apiClient.post('/projects/create', data);
-await apiClient.put('/users/update/456', updates);
-await apiClient.get('/email/templates');
-
-// ❌ WRONG - Do NOT add /api/ prefix
-await apiClient.get('/api/blog/posts/123');  // WRONG!
-await apiClient.post('/api/projects/create', data); // WRONG!
-```
-
-**Microservice Routing:**
-- Form service: `/blog/*`
-- Projects service: `/projects/*`
-- Email service: `/email/*`
-- Users service: `/users/*`
-
-**Why:** API routing is handled by proxy configuration, no `/api/` prefix needed.
-
----
-
-## Mutations
-
-### Basic Mutation Pattern
-
-```typescript
-import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { myFeatureApi } from '../api/myFeatureApi';
-import { useMuiSnackbar } from '@/hooks/useMuiSnackbar';
-
-export const MyComponent: React.FC = () => {
-    const queryClient = useQueryClient();
-    const { showSuccess, showError } = useMuiSnackbar();
-
-    const updateMutation = useMutation({
-        mutationFn: (payload: UpdatePayload) =>
-            myFeatureApi.updateEntity(blogId, entityId, payload),
-
-        onSuccess: () => {
-            // Invalidate and refetch
-            queryClient.invalidateQueries({
-                queryKey: ['entity', blogId, entityId]
-            });
-            showSuccess('Entity updated successfully');
-        },
-
-        onError: (error) => {
-            showError('Failed to update entity');
-            console.error('Update error:', error);
-        },
+// app/weather/page.tsx
+export default async function WeatherPage() {
+    // Cached for 1 hour
+    const res = await fetch('https://api.weather.com/forecast', {
+        next: { revalidate: 3600 },
     });
 
-    const handleUpdate = () => {
-        updateMutation.mutate({ name: 'New Name' });
-    };
+    const weather = await res.json();
 
-    return (
-        <Button
-            onClick={handleUpdate}
-            disabled={updateMutation.isPending}
-        >
-            {updateMutation.isPending ? 'Updating...' : 'Update'}
-        </Button>
-    );
-};
+    return <WeatherDisplay data={weather} />;
+}
 ```
 
-### Optimistic Updates
+### Caching Strategies
 
+**Static (cached indefinitely):**
 ```typescript
-const updateMutation = useMutation({
-    mutationFn: (payload) => myFeatureApi.update(id, payload),
-
-    // Optimistic update
-    onMutate: async (newData) => {
-        // Cancel outgoing refetches
-        await queryClient.cancelQueries({ queryKey: ['entity', id] });
-
-        // Snapshot current value
-        const previousData = queryClient.getQueryData(['entity', id]);
-
-        // Optimistically update
-        queryClient.setQueryData(['entity', id], (old) => ({
-            ...old,
-            ...newData,
-        }));
-
-        // Return rollback function
-        return { previousData };
-    },
-
-    // Rollback on error
-    onError: (err, newData, context) => {
-        queryClient.setQueryData(['entity', id], context.previousData);
-        showError('Update failed');
-    },
-
-    // Refetch after success or error
-    onSettled: () => {
-        queryClient.invalidateQueries({ queryKey: ['entity', id] });
-    },
+const res = await fetch('https://api.example.com/data', {
+    cache: 'force-cache', // Default
 });
 ```
 
+**Revalidate after time:**
+```typescript
+const res = await fetch('https://api.example.com/data', {
+    next: { revalidate: 60 }, // Revalidate every 60 seconds
+});
+```
+
+**No caching (always fresh):**
+```typescript
+const res = await fetch('https://api.example.com/data', {
+    cache: 'no-store', // Opt out of caching
+});
+```
+
+**Tag-based revalidation:**
+```typescript
+const res = await fetch('https://api.example.com/data', {
+    next: { tags: ['orders'] },
+});
+
+// Later, revalidate by tag:
+// revalidateTag('orders');
+```
+
 ---
 
-## Advanced Query Patterns
+## Server Actions for Mutations
 
-### Prefetching
+### Form Submissions
+
+**Primary pattern for creating/updating data:**
 
 ```typescript
-export function usePrefetchEntity() {
-    const queryClient = useQueryClient();
+// actions/orders.ts
+'use server';
 
-    return (blogId: number, entityId: number) => {
-        return queryClient.prefetchQuery({
-            queryKey: ['entity', blogId, entityId],
-            queryFn: () => myFeatureApi.getEntity(blogId, entityId),
-            staleTime: 5 * 60 * 1000,
+import { prisma } from '@/lib/db';
+import { revalidatePath } from 'next/cache';
+import { redirect } from 'next/navigation';
+
+export async function createOrder(formData: FormData) {
+    // Extract form data
+    const customerId = formData.get('customerId') as string;
+    const amount = parseFloat(formData.get('amount') as string);
+
+    // Validate (use Zod for production)
+    if (!customerId || !amount) {
+        throw new Error('Missing required fields');
+    }
+
+    // Create order
+    const order = await prisma.order.create({
+        data: {
+            customerId,
+            amount,
+            status: 'pending',
+        },
+    });
+
+    // Revalidate affected pages
+    revalidatePath('/orders');
+
+    // Redirect to new order
+    redirect(`/orders/${order.id}`);
+}
+```
+
+**Usage in Client Component:**
+
+```typescript
+// features/orders/components/CreateOrderForm.tsx
+'use client';
+
+import { createOrder } from '@/actions/orders';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+
+export function CreateOrderForm() {
+    return (
+        <form action={createOrder} className="space-y-4">
+            <Input name="customerId" placeholder="Customer ID" required />
+            <Input name="amount" type="number" placeholder="Amount" required />
+            <Button type="submit">Create Order</Button>
+        </form>
+    );
+}
+```
+
+**Benefits:**
+- Progressive enhancement (works without JS)
+- Type-safe with TypeScript
+- Direct database access
+- Automatic revalidation
+
+---
+
+### Server Actions with useTransition
+
+**For better UX, use `useTransition` to show pending state:**
+
+```typescript
+// features/orders/components/CreateOrderForm.tsx
+'use client';
+
+import { useTransition } from 'react';
+import { createOrder } from '@/actions/orders';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+
+export function CreateOrderForm() {
+    const [isPending, startTransition] = useTransition();
+
+    async function handleSubmit(formData: FormData) {
+        startTransition(async () => {
+            await createOrder(formData);
         });
+    }
+
+    return (
+        <form action={handleSubmit} className="space-y-4">
+            <Input name="customerId" placeholder="Customer ID" required />
+            <Input name="amount" type="number" placeholder="Amount" required />
+            <Button type="submit" disabled={isPending}>
+                {isPending ? 'Creating...' : 'Create Order'}
+            </Button>
+        </form>
+    );
+}
+```
+
+---
+
+### Update/Delete Mutations
+
+**Bind arguments to server actions:**
+
+```typescript
+// actions/orders.ts
+'use server';
+
+import { prisma } from '@/lib/db';
+import { revalidatePath } from 'next/cache';
+
+export async function updateOrder(id: string, formData: FormData) {
+    const status = formData.get('status') as string;
+
+    await prisma.order.update({
+        where: { id },
+        data: { status },
+    });
+
+    revalidatePath('/orders');
+    revalidatePath(`/orders/${id}`);
+}
+
+export async function deleteOrder(id: string) {
+    await prisma.order.delete({
+        where: { id },
+    });
+
+    revalidatePath('/orders');
+}
+```
+
+**Usage with .bind():**
+
+```typescript
+// features/orders/components/OrderActions.tsx
+'use client';
+
+import { updateOrder, deleteOrder } from '@/actions/orders';
+import { Button } from '@/components/ui/button';
+
+interface OrderActionsProps {
+    orderId: string;
+}
+
+export function OrderActions({ orderId }: OrderActionsProps) {
+    // Bind orderId to server actions
+    const updateWithId = updateOrder.bind(null, orderId);
+    const deleteWithId = deleteOrder.bind(null, orderId);
+
+    return (
+        <div className="space-x-2">
+            <form action={updateWithId} className="inline">
+                <input type="hidden" name="status" value="completed" />
+                <Button type="submit">Complete</Button>
+            </form>
+
+            <form action={deleteWithId} className="inline">
+                <Button type="submit" variant="destructive">
+                    Delete
+                </Button>
+            </form>
+        </div>
+    );
+}
+```
+
+---
+
+## Client-Side Data Fetching
+
+### Custom Hooks for Search/Filtering
+
+**When users need dynamic queries (search, filter), use client-side hooks:**
+
+```typescript
+// features/orders/hooks/useSearchOrders.ts
+'use client';
+
+import { useState } from 'react';
+import { searchOrders } from '@/actions/orders';
+import type { Order } from '@/types/order';
+
+export function useSearchOrders() {
+    const [results, setResults] = useState<Order[]>([]);
+    const [isSearching, setIsSearching] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+
+    async function search(query: string) {
+        setIsSearching(true);
+        setError(null);
+
+        try {
+            const orders = await searchOrders(query);
+            setResults(orders);
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Search failed');
+        } finally {
+            setIsSearching(false);
+        }
+    }
+
+    return {
+        results,
+        isSearching,
+        error,
+        search,
     };
 }
-
-// Usage: Prefetch on hover
-<div onMouseEnter={() => prefetch(blogId, id)}>
-    <Link to={`/entity/${id}`}>View</Link>
-</div>
 ```
 
-### Cache Access Without Fetching
+**Server Action for search:**
 
 ```typescript
-export function useEntityFromCache(blogId: number, entityId: number) {
-    const queryClient = useQueryClient();
+// actions/orders.ts
+'use server';
 
-    // Get from cache, don't fetch if missing
-    const directCache = queryClient.getQueryData<MyEntity>(['entity', blogId, entityId]);
+import { prisma } from '@/lib/db';
 
-    if (directCache) return directCache;
+export async function searchOrders(query: string) {
+    const orders = await prisma.order.findMany({
+        where: {
+            OR: [
+                { id: { contains: query, mode: 'insensitive' } },
+                { customerName: { contains: query, mode: 'insensitive' } },
+            ],
+        },
+        take: 20,
+    });
 
-    // Try grid cache
-    const gridCache = queryClient.getQueryData<{ rows: MyEntity[] }>(['entities-v2', blogId]);
-
-    return gridCache?.rows.find(row => row.id === entityId);
+    return orders;
 }
 ```
 
-### Dependent Queries
+**Usage in Component:**
 
 ```typescript
-// Fetch user first, then user's settings
-const { data: user } = useSuspenseQuery({
-    queryKey: ['user', userId],
-    queryFn: () => userApi.getUser(userId),
-});
+// features/orders/components/OrdersSearch.tsx
+'use client';
 
-const { data: settings } = useSuspenseQuery({
-    queryKey: ['user', userId, 'settings'],
-    queryFn: () => settingsApi.getUserSettings(user.id),
-    // Automatically waits for user to load due to Suspense
-});
+import { useState } from 'react';
+import { useSearchOrders } from '../hooks/useSearchOrders';
+import { Input } from '@/components/ui/input';
+import { Button } from '@/components/ui/button';
+
+export function OrdersSearch() {
+    const [query, setQuery] = useState('');
+    const { results, isSearching, error, search } = useSearchOrders();
+
+    async function handleSearch(e: React.FormEvent) {
+        e.preventDefault();
+        await search(query);
+    }
+
+    return (
+        <div className="space-y-4">
+            <form onSubmit={handleSearch} className="flex gap-2">
+                <Input
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    placeholder="Search orders..."
+                />
+                <Button type="submit" disabled={isSearching}>
+                    {isSearching ? 'Searching...' : 'Search'}
+                </Button>
+            </form>
+
+            {error && <p className="text-red-500">{error}</p>}
+
+            {results.length > 0 && (
+                <div>
+                    <h3>Results ({results.length})</h3>
+                    {results.map((order) => (
+                        <div key={order.id}>{order.id}</div>
+                    ))}
+                </div>
+            )}
+        </div>
+    );
+}
 ```
 
 ---
 
-## API Client Configuration
+### Hook Pattern for Mutations
 
-### Using apiClient
+**Client-side mutations with loading/error states:**
 
 ```typescript
-import apiClient from '@/lib/apiClient';
+// features/orders/hooks/useUpdateOrder.ts
+'use client';
 
-// apiClient is a configured axios instance
-// Automatically includes:
-// - Base URL configuration
-// - Cookie-based authentication
-// - Error interceptors
-// - Response transformers
+import { useState } from 'react';
+import { updateOrderStatus } from '@/actions/orders';
+import { useRouter } from 'next/navigation';
+
+export function useUpdateOrder() {
+    const [isUpdating, setIsUpdating] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const router = useRouter();
+
+    async function update(orderId: string, status: string) {
+        setIsUpdating(true);
+        setError(null);
+
+        try {
+            await updateOrderStatus(orderId, status);
+            router.refresh(); // Trigger Server Component re-fetch
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Update failed');
+        } finally {
+            setIsUpdating(false);
+        }
+    }
+
+    return {
+        update,
+        isUpdating,
+        error,
+    };
+}
 ```
 
-**Do NOT create new axios instances** - use apiClient for consistency.
-
----
-
-## Error Handling in Queries
-
-### onError Callback
+**Server Action:**
 
 ```typescript
-import { useMuiSnackbar } from '@/hooks/useMuiSnackbar';
+// actions/orders.ts
+'use server';
 
-const { showError } = useMuiSnackbar();
+import { prisma } from '@/lib/db';
+import { revalidatePath } from 'next/cache';
 
-const { data } = useSuspenseQuery({
-    queryKey: ['entity', id],
-    queryFn: () => myFeatureApi.getEntity(id),
+export async function updateOrderStatus(id: string, status: string) {
+    await prisma.order.update({
+        where: { id },
+        data: { status },
+    });
 
-    // Handle errors
-    onError: (error) => {
-        showError('Failed to load entity');
-        console.error('Load error:', error);
-    },
-});
+    revalidatePath('/orders');
+    revalidatePath(`/orders/${id}`);
+}
 ```
 
-### Error Boundaries
-
-Combine with Error Boundaries for comprehensive error handling:
+**Usage:**
 
 ```typescript
-import { ErrorBoundary } from 'react-error-boundary';
+// features/orders/components/OrderStatusButton.tsx
+'use client';
 
-<ErrorBoundary
-    fallback={<ErrorDisplay />}
-    onError={(error) => console.error(error)}
->
-    <SuspenseLoader>
-        <ComponentWithSuspenseQuery />
-    </SuspenseLoader>
-</ErrorBoundary>
-```
+import { useUpdateOrder } from '../hooks/useUpdateOrder';
+import { Button } from '@/components/ui/button';
 
----
-
-## Complete Examples
-
-### Example 1: Simple Entity Fetch
-
-```typescript
-import React from 'react';
-import { useSuspenseQuery } from '@tanstack/react-query';
-import { Box, Typography } from '@mui/material';
-import { userApi } from '../api/userApi';
-
-interface UserProfileProps {
-    userId: string;
+interface OrderStatusButtonProps {
+    orderId: string;
 }
 
-export const UserProfile: React.FC<UserProfileProps> = ({ userId }) => {
-    const { data: user } = useSuspenseQuery({
-        queryKey: ['user', userId],
-        queryFn: () => userApi.getUser(userId),
-        staleTime: 5 * 60 * 1000,
+export function OrderStatusButton({ orderId }: OrderStatusButtonProps) {
+    const { update, isUpdating, error } = useUpdateOrder();
+
+    return (
+        <div>
+            <Button
+                onClick={() => update(orderId, 'completed')}
+                disabled={isUpdating}
+            >
+                {isUpdating ? 'Updating...' : 'Mark Complete'}
+            </Button>
+            {error && <p className="text-red-500 text-sm">{error}</p>}
+        </div>
+    );
+}
+```
+
+---
+
+## Revalidation Strategies
+
+### revalidatePath()
+
+**Revalidate specific pages after mutations:**
+
+```typescript
+'use server';
+
+import { revalidatePath } from 'next/cache';
+
+export async function createOrder(formData: FormData) {
+    // ... create order
+
+    // Revalidate list page
+    revalidatePath('/orders');
+
+    // Revalidate detail page
+    revalidatePath(`/orders/${order.id}`);
+}
+```
+
+### revalidateTag()
+
+**Tag-based revalidation for related pages:**
+
+```typescript
+// Tag data fetches
+const orders = await fetch('https://api.example.com/orders', {
+    next: { tags: ['orders'] },
+});
+
+// Later, revalidate all 'orders' tagged fetches
+import { revalidateTag } from 'next/cache';
+
+export async function createOrder(formData: FormData) {
+    // ... create order
+
+    // Revalidate all 'orders' fetches
+    revalidateTag('orders');
+}
+```
+
+### router.refresh()
+
+**Client-side refresh from hooks:**
+
+```typescript
+'use client';
+
+import { useRouter } from 'next/navigation';
+
+export function useRefresh() {
+    const router = useRouter();
+
+    function refresh() {
+        router.refresh(); // Re-fetch Server Component data
+    }
+
+    return { refresh };
+}
+```
+
+---
+
+## Error Handling
+
+### try/catch in Server Actions
+
+```typescript
+'use server';
+
+import { prisma } from '@/lib/db';
+
+export async function createOrder(formData: FormData) {
+    try {
+        const order = await prisma.order.create({
+            data: {
+                customerId: formData.get('customerId') as string,
+                amount: parseFloat(formData.get('amount') as string),
+            },
+        });
+
+        revalidatePath('/orders');
+        return { success: true, order };
+    } catch (error) {
+        console.error('Order creation failed:', error);
+        return { success: false, error: 'Failed to create order' };
+    }
+}
+```
+
+**Handle in Client Component:**
+
+```typescript
+'use client';
+
+import { useTransition } from 'react';
+import { createOrder } from '@/actions/orders';
+import { useToast } from '@/hooks/useToast';
+
+export function CreateOrderForm() {
+    const [isPending, startTransition] = useTransition();
+    const { toast } = useToast();
+
+    async function handleSubmit(formData: FormData) {
+        startTransition(async () => {
+            const result = await createOrder(formData);
+
+            if (result.success) {
+                toast({ title: 'Order created successfully' });
+            } else {
+                toast({ title: 'Error', description: result.error, variant: 'destructive' });
+            }
+        });
+    }
+
+    return <form action={handleSubmit}>...</form>;
+}
+```
+
+---
+
+## Complete Data Flow Examples
+
+### Example 1: Server-Side Fetch (Simple)
+
+```typescript
+// app/orders/page.tsx
+import { prisma } from '@/lib/db';
+import { OrdersList } from '@/features/orders/components/OrdersList';
+
+export default async function OrdersPage() {
+    const orders = await prisma.order.findMany({
+        include: { customer: true },
+        orderBy: { createdAt: 'desc' },
     });
 
     return (
-        <Box>
-            <Typography variant='h5'>{user.name}</Typography>
-            <Typography>{user.email}</Typography>
-        </Box>
+        <div className="container">
+            <h1>Orders</h1>
+            <OrdersList orders={orders} />
+        </div>
     );
-};
-
-// Usage with Suspense
-<SuspenseLoader>
-    <UserProfile userId='123' />
-</SuspenseLoader>
-```
-
-### Example 2: Cache-First Strategy
-
-```typescript
-import { useSuspenseQuery, useQueryClient } from '@tanstack/react-query';
-import { postApi } from '../api/postApi';
-import type { Post } from '../types';
-
-/**
- * Hook with cache-first strategy
- * Checks grid cache before API call
- */
-export function useSuspensePost(blogId: number, postId: number) {
-    const queryClient = useQueryClient();
-
-    return useSuspenseQuery<Post, Error>({
-        queryKey: ['post', blogId, postId],
-        queryFn: async () => {
-            // 1. Check grid cache first
-            const gridCache = queryClient.getQueryData<{ rows: Post[] }>([
-                'posts-v2',
-                blogId,
-                'summary'
-            ]) || queryClient.getQueryData<{ rows: Post[] }>([
-                'posts-v2',
-                blogId,
-                'flat'
-            ]);
-
-            if (gridCache?.rows) {
-                const cached = gridCache.rows.find(row => row.S_ID === postId);
-                if (cached) {
-                    return cached;  // Reuse grid data
-                }
-            }
-
-            // 2. Not in cache, fetch directly
-            return postApi.getPost(blogId, postId);
-        },
-        staleTime: 5 * 60 * 1000,
-        gcTime: 10 * 60 * 1000,
-        refetchOnWindowFocus: false,
-    });
 }
 ```
 
-**Benefits:**
-- Avoids duplicate API calls
-- Instant data if already loaded
-- Falls back to API if not cached
+### Example 2: Server Action Fetch (Reusable)
+
+```typescript
+// actions/orders.ts
+'use server';
+
+import { prisma } from '@/lib/db';
+
+export async function getOrders(filters?: { status?: string; limit?: number }) {
+    return await prisma.order.findMany({
+        where: filters?.status ? { status: filters.status } : undefined,
+        take: filters?.limit,
+        include: { customer: true },
+        orderBy: { createdAt: 'desc' },
+    });
+}
+
+// app/orders/page.tsx
+import { getOrders } from '@/actions/orders';
+import { OrdersList } from '@/features/orders/components/OrdersList';
+
+export default async function OrdersPage() {
+    const orders = await getOrders({ status: 'active', limit: 50 });
+    return <OrdersList orders={orders} />;
+}
+```
 
 ### Example 3: Parallel Fetching
 
 ```typescript
-import { useSuspenseQueries } from '@tanstack/react-query';
+// app/dashboard/page.tsx
+import { getStats, getOrders, getCustomers } from '@/actions/dashboard';
 
-export const Dashboard: React.FC = () => {
-    const [statsQuery, projectsQuery, notificationsQuery] = useSuspenseQueries({
-        queries: [
-            {
-                queryKey: ['stats'],
-                queryFn: () => statsApi.getStats(),
-            },
-            {
-                queryKey: ['projects', 'active'],
-                queryFn: () => projectsApi.getActiveProjects(),
-            },
-            {
-                queryKey: ['notifications', 'unread'],
-                queryFn: () => notificationsApi.getUnread(),
-            },
-        ],
-    });
+export default async function DashboardPage() {
+    const [stats, orders, customers] = await Promise.all([
+        getStats(),
+        getOrders({ limit: 5 }),
+        getCustomers({ limit: 5 }),
+    ]);
 
     return (
-        <Box>
-            <StatsCard data={statsQuery.data} />
-            <ProjectsList projects={projectsQuery.data} />
-            <Notifications items={notificationsQuery.data} />
-        </Box>
+        <div className="grid grid-cols-3 gap-4">
+            <StatsCard data={stats} />
+            <OrdersList orders={orders} />
+            <CustomersList customers={customers} />
+        </div>
     );
-};
+}
 ```
 
----
-
-## Mutations with Cache Invalidation
-
-### Update Mutation
+### Example 4: Client Search Hook
 
 ```typescript
-import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { postApi } from '../api/postApi';
-import { useMuiSnackbar } from '@/hooks/useMuiSnackbar';
+// features/orders/hooks/useSearchOrders.ts
+'use client';
 
-export const useUpdatePost = () => {
-    const queryClient = useQueryClient();
-    const { showSuccess, showError } = useMuiSnackbar();
+import { useState } from 'react';
+import { searchOrders } from '@/actions/orders';
 
-    return useMutation({
-        mutationFn: ({ blogId, postId, data }: UpdateParams) =>
-            postApi.updatePost(blogId, postId, data),
+export function useSearchOrders() {
+    const [results, setResults] = useState([]);
+    const [isSearching, setIsSearching] = useState(false);
 
-        onSuccess: (data, variables) => {
-            // Invalidate specific post
-            queryClient.invalidateQueries({
-                queryKey: ['post', variables.blogId, variables.postId]
-            });
+    async function search(query: string) {
+        setIsSearching(true);
+        try {
+            const orders = await searchOrders(query);
+            setResults(orders);
+        } finally {
+            setIsSearching(false);
+        }
+    }
 
-            // Invalidate list to refresh grid
-            queryClient.invalidateQueries({
-                queryKey: ['posts-v2', variables.blogId]
-            });
+    return { results, isSearching, search };
+}
 
-            showSuccess('Post updated');
-        },
+// features/orders/components/OrdersSearch.tsx
+'use client';
 
-        onError: (error) => {
-            showError('Failed to update post');
-            console.error('Update error:', error);
+import { useSearchOrders } from '../hooks/useSearchOrders';
+
+export function OrdersSearch() {
+    const { results, isSearching, search } = useSearchOrders();
+
+    return (
+        <div>
+            <input onChange={(e) => search(e.target.value)} />
+            {isSearching ? 'Searching...' : `${results.length} results`}
+        </div>
+    );
+}
+```
+
+### Example 5: Form with Server Action
+
+```typescript
+// actions/orders.ts
+'use server';
+
+import { prisma } from '@/lib/db';
+import { revalidatePath } from 'next/cache';
+import { redirect } from 'next/navigation';
+
+export async function createOrder(formData: FormData) {
+    const order = await prisma.order.create({
+        data: {
+            customerId: formData.get('customerId') as string,
+            amount: parseFloat(formData.get('amount') as string),
         },
     });
-};
 
-// Usage
-const updatePost = useUpdatePost();
+    revalidatePath('/orders');
+    redirect(`/orders/${order.id}`);
+}
 
-const handleSave = () => {
-    updatePost.mutate({
-        blogId: 123,
-        postId: 456,
-        data: { responses: { '101': 'value' } }
-    });
-};
-```
+// features/orders/components/CreateOrderForm.tsx
+'use client';
 
-### Delete Mutation
+import { useTransition } from 'react';
+import { createOrder } from '@/actions/orders';
 
-```typescript
-export const useDeletePost = () => {
-    const queryClient = useQueryClient();
-    const { showSuccess, showError } = useMuiSnackbar();
+export function CreateOrderForm() {
+    const [isPending, startTransition] = useTransition();
 
-    return useMutation({
-        mutationFn: ({ blogId, postId }: DeleteParams) =>
-            postApi.deletePost(blogId, postId),
-
-        onSuccess: (data, variables) => {
-            // Remove from cache manually (optimistic)
-            queryClient.setQueryData<{ rows: Post[] }>(
-                ['posts-v2', variables.blogId],
-                (old) => ({
-                    ...old,
-                    rows: old?.rows.filter(row => row.S_ID !== variables.postId) || []
-                })
-            );
-
-            showSuccess('Post deleted');
-        },
-
-        onError: (error, variables) => {
-            // Rollback - refetch to get accurate state
-            queryClient.invalidateQueries({
-                queryKey: ['posts-v2', variables.blogId]
-            });
-            showError('Failed to delete post');
-        },
-    });
-};
-```
-
----
-
-## Query Configuration Best Practices
-
-### Default Configuration
-
-```typescript
-// In QueryClientProvider setup
-const queryClient = new QueryClient({
-    defaultOptions: {
-        queries: {
-            staleTime: 1000 * 60 * 5,        // 5 minutes
-            gcTime: 1000 * 60 * 10,           // 10 minutes (was cacheTime)
-            refetchOnWindowFocus: false,       // Don't refetch on focus
-            refetchOnMount: false,             // Don't refetch on mount if fresh
-            retry: 1,                          // Retry failed queries once
-        },
-    },
-});
-```
-
-### Per-Query Overrides
-
-```typescript
-// Frequently changing data - shorter staleTime
-useSuspenseQuery({
-    queryKey: ['notifications', 'unread'],
-    queryFn: () => notificationApi.getUnread(),
-    staleTime: 30 * 1000,  // 30 seconds
-});
-
-// Rarely changing data - longer staleTime
-useSuspenseQuery({
-    queryKey: ['form', blogId, 'structure'],
-    queryFn: () => formApi.getStructure(blogId),
-    staleTime: 30 * 60 * 1000,  // 30 minutes
-});
+    return (
+        <form action={(formData) => startTransition(async () => await createOrder(formData))}>
+            <input name="customerId" required />
+            <input name="amount" type="number" required />
+            <button disabled={isPending}>
+                {isPending ? 'Creating...' : 'Create'}
+            </button>
+        </form>
+    );
+}
 ```
 
 ---
@@ -752,16 +924,17 @@ useSuspenseQuery({
 
 **Modern Data Fetching Recipe:**
 
-1. **Create API Service**: `features/X/api/XApi.ts` using apiClient
-2. **Use useSuspenseQuery**: In components wrapped by SuspenseLoader
-3. **Cache-First**: Check grid cache before API call
-4. **Query Keys**: Consistent naming ['entity', id]
-5. **Route Format**: `/blog/route` NOT `/api/blog/route`
-6. **Mutations**: invalidateQueries after success
-7. **Error Handling**: onError + useMuiSnackbar
-8. **Type Safety**: Type all parameters and returns
+1. **Server Components (Default)**: async fetch directly in page.tsx
+2. **Server Actions**: Reusable fetch/mutation logic in actions/*.ts
+3. **Parallel Fetching**: Promise.all() for concurrent requests
+4. **Streaming**: Suspense boundaries for progressive rendering
+5. **Client Hooks**: useSearchOrders, useUpdateOrder for dynamic client queries
+6. **Revalidation**: revalidatePath(), revalidateTag(), router.refresh()
+7. **Error Handling**: try/catch with user feedback
+8. **No API Routes**: Direct database + Server Actions replace API layer
 
 **See Also:**
-- [component-patterns.md](component-patterns.md) - Suspense integration
-- [loading-and-error-states.md](loading-and-error-states.md) - SuspenseLoader usage
+- [component-patterns.md](component-patterns.md) - Server/Client component patterns
+- [server-actions.md](server-actions.md) - Deep dive on Server Actions
+- [server-components.md](server-components.md) - Advanced Server Component patterns
 - [complete-examples.md](complete-examples.md) - Full working examples

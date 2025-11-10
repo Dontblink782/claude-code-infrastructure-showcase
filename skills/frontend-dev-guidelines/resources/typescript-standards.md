@@ -1,6 +1,6 @@
 # TypeScript Standards
 
-TypeScript best practices for type safety and maintainability in React frontend code.
+TypeScript best practices for type safety and maintainability in Next.js 15 App Router applications.
 
 ---
 
@@ -8,7 +8,7 @@ TypeScript best practices for type safety and maintainability in React frontend 
 
 ### Configuration
 
-TypeScript strict mode is **enabled** in the project:
+TypeScript strict mode is **enabled** in Next.js projects:
 
 ```json
 // tsconfig.json
@@ -16,7 +16,11 @@ TypeScript strict mode is **enabled** in the project:
     "compilerOptions": {
         "strict": true,
         "noImplicitAny": true,
-        "strictNullChecks": true
+        "strictNullChecks": true,
+        "target": "ES2017",
+        "lib": ["dom", "dom.iterable", "esnext"],
+        "module": "esnext",
+        "jsx": "preserve"
     }
 }
 ```
@@ -25,6 +29,7 @@ TypeScript strict mode is **enabled** in the project:
 - No implicit `any` types
 - Null/undefined must be handled explicitly
 - Type safety enforced
+- Modern JavaScript features
 
 ---
 
@@ -39,19 +44,22 @@ function handleData(data: any) {
 }
 
 // ✅ Use specific types
-interface MyData {
-    something: string;
+interface OrderData {
+    id: string;
+    amount: number;
+    status: string;
 }
 
-function handleData(data: MyData) {
-    return data.something;
+function handleData(data: OrderData) {
+    return data.amount;
 }
 
 // ✅ Or use unknown for truly unknown data
 function handleUnknown(data: unknown) {
-    if (typeof data === 'object' && data !== null && 'something' in data) {
-        return (data as MyData).something;
+    if (typeof data === 'object' && data !== null && 'amount' in data) {
+        return (data as OrderData).amount;
     }
+    throw new Error('Invalid data');
 }
 ```
 
@@ -62,40 +70,116 @@ function handleUnknown(data: unknown) {
 
 ---
 
-## Explicit Return Types
+## Server Component Typing
 
-### Function Return Types
+### Async Server Components
 
 ```typescript
-// ✅ CORRECT - Explicit return type
-function getUser(id: number): Promise<User> {
-    return apiClient.get(`/users/${id}`);
-}
+// app/orders/page.tsx
+import type { Order } from '@/types/order';
 
-function calculateTotal(items: Item[]): number {
-    return items.reduce((sum, item) => sum + item.price, 0);
-}
+// Server Components can be async
+export default async function OrdersPage() {
+    const orders: Order[] = await getOrders();
 
-// ❌ AVOID - Implicit return type (less clear)
-function getUser(id: number) {
-    return apiClient.get(`/users/${id}`);
+    return <OrdersList orders={orders} />;
 }
 ```
 
-### Component Return Types
+### Params and SearchParams
 
 ```typescript
-// React.FC already provides return type (ReactElement)
-export const MyComponent: React.FC<Props> = ({ prop }) => {
-    return <div>{prop}</div>;
+// app/orders/[id]/page.tsx
+interface PageProps {
+    params: { id: string };
+    searchParams: { status?: string; page?: string };
+}
+
+export default async function OrderDetailPage({
+    params,
+    searchParams,
+}: PageProps) {
+    const orderId: string = params.id;
+    const status: string | undefined = searchParams.status;
+    const page: number = Number(searchParams.page) || 1;
+
+    const order = await getOrder(orderId);
+
+    return <OrderDetails order={order} />;
+}
+```
+
+### generateMetadata Typing
+
+```typescript
+// app/orders/[id]/page.tsx
+import type { Metadata } from 'next';
+
+interface PageProps {
+    params: { id: string };
+}
+
+export async function generateMetadata({
+    params,
+}: PageProps): Promise<Metadata> {
+    const order = await getOrder(params.id);
+
+    return {
+        title: `Order ${order.orderNumber}`,
+        description: `Order details for ${order.customerName}`,
+    };
+}
+```
+
+---
+
+## Client Component Typing
+
+### No React.FC (Deprecated Pattern)
+
+```typescript
+// ❌ OLD - React.FC was common in React 17
+export const OrderCard: React.FC<OrderCardProps> = ({ order }) => {
+    return <div>{order.id}</div>;
 };
 
-// For custom hooks
-function useMyData(id: number): { data: Data; isLoading: boolean } {
-    const [data, setData] = useState<Data | null>(null);
-    const [isLoading, setIsLoading] = useState(true);
+// ✅ NEW - Direct function typing (Next.js/React 18+)
+interface OrderCardProps {
+    order: Order;
+    onClick?: (id: string) => void;
+}
 
-    return { data: data!, isLoading };
+export function OrderCard({ order, onClick }: OrderCardProps) {
+    return (
+        <div onClick={() => onClick?.(order.id)}>
+            {order.id}
+        </div>
+    );
+}
+```
+
+**Why avoid React.FC:**
+- No implicit children
+- Cleaner syntax
+- Better type inference
+- Modern React pattern
+
+### Props with Children
+
+```typescript
+interface ContainerProps {
+    children: React.ReactNode;
+    title: string;
+    className?: string;
+}
+
+export function Container({ children, title, className }: ContainerProps) {
+    return (
+        <div className={className}>
+            <h2 className="text-2xl font-bold">{title}</h2>
+            {children}
+        </div>
+    );
 }
 ```
 
@@ -107,12 +191,11 @@ function useMyData(id: number): { data: Data; isLoading: boolean } {
 
 ```typescript
 // ✅ CORRECT - Explicitly mark as type import
-import type { User } from '~types/user';
-import type { Post } from '~types/post';
-import type { SxProps, Theme } from '@mui/material';
+import type { Order } from '@/types/order';
+import type { User } from '@/types/user';
 
 // ❌ AVOID - Mixed value and type imports
-import { User } from '~types/user';  // Unclear if type or value
+import { Order } from '@/types/order';  // Unclear if type or value
 ```
 
 **Benefits:**
@@ -120,6 +203,91 @@ import { User } from '~types/user';  // Unclear if type or value
 - Better tree-shaking
 - Prevents circular dependencies
 - TypeScript compiler optimization
+
+### Import Aliases
+
+**Single @ alias pattern:**
+
+```typescript
+// ✅ CORRECT - Use @/ for all imports
+import type { Order } from '@/types/order';
+import { Button } from '@/components/ui/button';
+import { getOrders } from '@/actions/orders';
+
+// ❌ AVOID - Multiple aliases
+import type { Order } from '~types/order';
+import { Button } from '~components/ui/button';
+```
+
+---
+
+## Server Action Typing
+
+### FormData Extraction
+
+```typescript
+// actions/orders.ts
+'use server';
+
+import { z } from 'zod';
+
+const orderSchema = z.object({
+    customerId: z.string().min(1),
+    amount: z.number().positive(),
+    status: z.enum(['pending', 'completed']),
+});
+
+export async function createOrder(formData: FormData) {
+    // Type-safe extraction with Zod
+    const parsed = orderSchema.safeParse({
+        customerId: formData.get('customerId'),
+        amount: Number(formData.get('amount')),
+        status: formData.get('status'),
+    });
+
+    if (!parsed.success) {
+        return {
+            success: false,
+            errors: parsed.error.flatten().fieldErrors,
+        };
+    }
+
+    // parsed.data is now type-safe
+    const order = await prisma.order.create({
+        data: parsed.data,
+    });
+
+    return { success: true, order };
+}
+```
+
+### Return Type Unions
+
+```typescript
+'use server';
+
+type ActionResult<T> =
+    | { success: true; data: T }
+    | { success: false; errors: Record<string, string[]> };
+
+export async function updateOrder(
+    id: string,
+    formData: FormData
+): Promise<ActionResult<Order>> {
+    // Implementation...
+    if (error) {
+        return {
+            success: false,
+            errors: { _form: ['Failed to update'] },
+        };
+    }
+
+    return {
+        success: true,
+        data: order,
+    };
+}
+```
 
 ---
 
@@ -129,30 +297,41 @@ import { User } from '~types/user';  // Unclear if type or value
 
 ```typescript
 /**
- * Props for MyComponent
+ * Props for OrderCard component
  */
-interface MyComponentProps {
-    /** The user ID to display */
-    userId: number;
+interface OrderCardProps {
+    /** The order to display */
+    order: Order;
 
-    /** Optional callback when action completes */
-    onComplete?: () => void;
+    /** Optional callback when card is clicked */
+    onClick?: (orderId: string) => void;
 
-    /** Display mode for the component */
-    mode?: 'view' | 'edit';
+    /** Display mode */
+    variant?: 'default' | 'compact';
 
     /** Additional CSS classes */
     className?: string;
 }
 
-export const MyComponent: React.FC<MyComponentProps> = ({
-    userId,
-    onComplete,
-    mode = 'view',  // Default value
+export function OrderCard({
+    order,
+    onClick,
+    variant = 'default',
     className,
-}) => {
-    return <div>...</div>;
-};
+}: OrderCardProps) {
+    return (
+        <div className={className} onClick={() => onClick?.(order.id)}>
+            {variant === 'compact' ? (
+                <span>{order.orderNumber}</span>
+            ) : (
+                <div>
+                    <h3>{order.orderNumber}</h3>
+                    <p>${order.amount}</p>
+                </div>
+            )}
+        </div>
+    );
+}
 ```
 
 **Key Points:**
@@ -160,25 +339,6 @@ export const MyComponent: React.FC<MyComponentProps> = ({
 - JSDoc comments for each prop
 - Optional props use `?`
 - Provide defaults in destructuring
-
-### Props with Children
-
-```typescript
-interface ContainerProps {
-    children: React.ReactNode;
-    title: string;
-}
-
-// React.FC automatically includes children type, but be explicit
-export const Container: React.FC<ContainerProps> = ({ children, title }) => {
-    return (
-        <div>
-            <h2>{title}</h2>
-            {children}
-        </div>
-    );
-};
-```
 
 ---
 
@@ -188,10 +348,17 @@ export const Container: React.FC<ContainerProps> = ({ children, title }) => {
 
 ```typescript
 // Make all properties optional
-type UserUpdate = Partial<User>;
+type OrderUpdate = Partial<Order>;
 
-function updateUser(id: number, updates: Partial<User>) {
-    // updates can have any subset of User properties
+export async function updateOrder(
+    id: string,
+    updates: Partial<Order>
+) {
+    // updates can have any subset of Order properties
+    await prisma.order.update({
+        where: { id },
+        data: updates,
+    });
 }
 ```
 
@@ -199,28 +366,31 @@ function updateUser(id: number, updates: Partial<User>) {
 
 ```typescript
 // Select specific properties
-type UserPreview = Pick<User, 'id' | 'name' | 'email'>;
+type OrderPreview = Pick<Order, 'id' | 'orderNumber' | 'amount'>;
 
-const preview: UserPreview = {
-    id: 1,
-    name: 'John',
-    email: 'john@example.com',
-    // Other User properties not allowed
-};
+export function OrderPreviewCard({ order }: { order: OrderPreview }) {
+    return (
+        <div>
+            <p>{order.orderNumber}</p>
+            <p>${order.amount}</p>
+        </div>
+    );
+}
 ```
 
 ### Omit<T, K>
 
 ```typescript
 // Exclude specific properties
-type UserWithoutPassword = Omit<User, 'password' | 'passwordHash'>;
+type OrderWithoutAudit = Omit<Order, 'createdAt' | 'updatedAt'>;
 
-const publicUser: UserWithoutPassword = {
-    id: 1,
-    name: 'John',
-    email: 'john@example.com',
-    // password and passwordHash not allowed
-};
+export function createOrderFromInput(
+    input: OrderWithoutAudit
+): Promise<Order> {
+    return prisma.order.create({
+        data: input,
+    });
+}
 ```
 
 ### Required<T>
@@ -234,17 +404,20 @@ type RequiredConfig = Required<Config>;  // All optional props become required
 
 ```typescript
 // Type-safe object/map
-const userMap: Record<string, User> = {
-    'user1': { id: 1, name: 'John' },
-    'user2': { id: 2, name: 'Jane' },
+const orderStatusColors: Record<string, string> = {
+    pending: 'bg-yellow-500',
+    completed: 'bg-green-500',
+    cancelled: 'bg-red-500',
 };
 
-// For styles
-import type { SxProps, Theme } from '@mui/material';
-
-const styles: Record<string, SxProps<Theme>> = {
-    container: { p: 2 },
-    header: { mb: 1 },
+// For variants
+const buttonVariants: Record<
+    'default' | 'destructive' | 'outline',
+    string
+> = {
+    default: 'bg-primary text-primary-foreground',
+    destructive: 'bg-destructive text-destructive-foreground',
+    outline: 'border border-input',
 };
 ```
 
@@ -255,41 +428,46 @@ const styles: Record<string, SxProps<Theme>> = {
 ### Basic Type Guards
 
 ```typescript
-function isUser(data: unknown): data is User {
+function isOrder(data: unknown): data is Order {
     return (
         typeof data === 'object' &&
         data !== null &&
         'id' in data &&
-        'name' in data
+        'orderNumber' in data &&
+        'amount' in data
     );
 }
 
 // Usage
-if (isUser(response)) {
-    console.log(response.name);  // TypeScript knows it's User
+if (isOrder(response)) {
+    console.log(response.orderNumber);  // TypeScript knows it's Order
 }
 ```
 
 ### Discriminated Unions
 
 ```typescript
-type LoadingState =
+type LoadingState<T> =
     | { status: 'idle' }
     | { status: 'loading' }
-    | { status: 'success'; data: Data }
+    | { status: 'success'; data: T }
     | { status: 'error'; error: Error };
 
-function Component({ state }: { state: LoadingState }) {
+export function OrderDisplay({
+    state,
+}: {
+    state: LoadingState<Order>;
+}) {
     // TypeScript narrows type based on status
     if (state.status === 'success') {
-        return <Display data={state.data} />;  // data available here
+        return <OrderDetails order={state.data} />;  // data available
     }
 
     if (state.status === 'error') {
-        return <Error error={state.error} />;  // error available here
+        return <ErrorDisplay error={state.error} />;  // error available
     }
 
-    return <Loading />;
+    return <LoadingSkeleton />;
 }
 ```
 
@@ -300,13 +478,16 @@ function Component({ state }: { state: LoadingState }) {
 ### Generic Functions
 
 ```typescript
-function getById<T>(items: T[], id: number): T | undefined {
-    return items.find(item => (item as any).id === id);
+function getById<T extends { id: string }>(
+    items: T[],
+    id: string
+): T | undefined {
+    return items.find(item => item.id === id);
 }
 
 // Usage with type inference
-const users: User[] = [...];
-const user = getById(users, 123);  // Type: User | undefined
+const orders: Order[] = [...];
+const order = getById(orders, '123');  // Type: Order | undefined
 ```
 
 ### Generic Components
@@ -315,49 +496,55 @@ const user = getById(users, 123);  // Type: User | undefined
 interface ListProps<T> {
     items: T[];
     renderItem: (item: T) => React.ReactNode;
+    keyExtractor: (item: T) => string;
 }
 
-export function List<T>({ items, renderItem }: ListProps<T>): React.ReactElement {
+export function List<T>({
+    items,
+    renderItem,
+    keyExtractor,
+}: ListProps<T>) {
     return (
         <div>
-            {items.map((item, index) => (
-                <div key={index}>{renderItem(item)}</div>
+            {items.map(item => (
+                <div key={keyExtractor(item)}>
+                    {renderItem(item)}
+                </div>
             ))}
         </div>
     );
 }
 
 // Usage
-<List<User>
-    items={users}
-    renderItem={(user) => <UserCard user={user} />}
+<List<Order>
+    items={orders}
+    renderItem={(order) => <OrderCard order={order} />}
+    keyExtractor={(order) => order.id}
 />
 ```
 
 ---
 
-## Type Assertions (Use Sparingly)
+## Prisma Type Integration
 
-### When to Use
-
-```typescript
-// ✅ OK - When you know more than TypeScript
-const element = document.getElementById('my-element') as HTMLInputElement;
-const value = element.value;
-
-// ✅ OK - API response that you've validated
-const response = await api.getData();
-const user = response.data as User;  // You know the shape
-```
-
-### When NOT to Use
+### Infer Types from Prisma
 
 ```typescript
-// ❌ AVOID - Circumventing type safety
-const data = getData() as any;  // WRONG - defeats TypeScript
+import type { Order, Prisma } from '@prisma/client';
 
-// ❌ AVOID - Unsafe assertion
-const value = unknownValue as string;  // Might not actually be string
+// Use Prisma's generated types
+type OrderWithCustomer = Prisma.OrderGetPayload<{
+    include: { customer: true };
+}>;
+
+export async function getOrderWithCustomer(
+    id: string
+): Promise<OrderWithCustomer> {
+    return await prisma.order.findUnique({
+        where: { id },
+        include: { customer: true },
+    });
+}
 ```
 
 ---
@@ -368,35 +555,68 @@ const value = unknownValue as string;  // Might not actually be string
 
 ```typescript
 // ✅ CORRECT
-const name = user?.profile?.name;
+const name = order?.customer?.name;
 
 // Equivalent to:
-const name = user && user.profile && user.profile.name;
+const name = order && order.customer && order.customer.name;
 ```
 
 ### Nullish Coalescing
 
 ```typescript
 // ✅ CORRECT
-const displayName = user?.name ?? 'Anonymous';
+const displayName = order?.customer?.name ?? 'Unknown';
 
 // Only uses default if null or undefined
 // (Different from || which triggers on '', 0, false)
+const count = order?.items?.length ?? 0;
 ```
 
 ### Non-Null Assertion (Use Carefully)
 
 ```typescript
-// ✅ OK - When you're certain value exists
-const data = queryClient.getQueryData<Data>(['data'])!;
+// ✅ OK - When you're certain value exists after check
+if (!order) {
+    throw new Error('Order not found');
+}
+
+const amount = order.amount!;  // We know it exists
 
 // ⚠️ CAREFUL - Only use when you KNOW it's not null
 // Better to check explicitly:
-const data = queryClient.getQueryData<Data>(['data']);
-if (data) {
-    // Use data
+if (order.amount) {
+    // Use order.amount
 }
 ```
+
+---
+
+## Zod for Runtime Validation
+
+### Schema Definition
+
+```typescript
+import { z } from 'zod';
+
+export const orderSchema = z.object({
+    customerId: z.string().uuid(),
+    amount: z.number().positive(),
+    status: z.enum(['pending', 'processing', 'completed', 'cancelled']),
+    items: z.array(z.object({
+        productId: z.string(),
+        quantity: z.number().int().positive(),
+        price: z.number().positive(),
+    })),
+});
+
+// Infer TypeScript type from Zod schema
+export type OrderInput = z.infer<typeof orderSchema>;
+```
+
+**Benefits:**
+- Runtime validation
+- Type inference from schema
+- Single source of truth
 
 ---
 
@@ -405,14 +625,25 @@ if (data) {
 **TypeScript Checklist:**
 - ✅ Strict mode enabled
 - ✅ No `any` type (use `unknown` if needed)
-- ✅ Explicit return types on functions
+- ✅ No `React.FC` (use direct function typing)
 - ✅ Use `import type` for type imports
+- ✅ Use single `@/` import alias
 - ✅ JSDoc comments on prop interfaces
 - ✅ Utility types (Partial, Pick, Omit, Required, Record)
 - ✅ Type guards for narrowing
 - ✅ Optional chaining and nullish coalescing
+- ✅ Zod for runtime validation
 - ❌ Avoid type assertions unless necessary
 
+**Next.js Specific:**
+- ✅ Type `params` and `searchParams` in page.tsx
+- ✅ Type `generateMetadata` return as `Promise<Metadata>`
+- ✅ Type Server Actions with FormData and return unions
+- ✅ Use Prisma generated types
+- ✅ Zod schemas for Server Action validation
+
 **See Also:**
+- [server-actions.md](server-actions.md) - Server Action typing
 - [component-patterns.md](component-patterns.md) - Component typing
 - [data-fetching.md](data-fetching.md) - API typing
+- [complete-examples.md](complete-examples.md) - Typed examples

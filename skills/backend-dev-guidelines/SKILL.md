@@ -1,24 +1,24 @@
 ---
 name: backend-dev-guidelines
-description: Comprehensive backend development guide for Node.js/Express/TypeScript microservices. Use when creating routes, controllers, services, repositories, middleware, or working with Express APIs, Prisma database access, Sentry error tracking, Zod validation, dependency injection, or async patterns. Covers layered architecture (routes → controllers → services → repositories), BaseController pattern, error handling, performance monitoring, testing strategies, and migration from legacy patterns.
+description: Complete backend development guide for Next.js + Supabase + Prisma applications. Use when creating server actions, server components, implementing RLS policies, building complex business logic with Prisma, auth with Supabase, Zod validation, or async error patterns. Covers two-path architecture (RLS vs Server Actions), when to use each path, helper functions, transactions, and migration from Express patterns.
 ---
 
 # Backend Development Guidelines
 
 ## Purpose
 
-Establish consistency and best practices across backend microservices (blog-api, auth-service, notifications-service) using modern Node.js/Express/TypeScript patterns.
+Establish consistency and best practices for Next.js + Supabase + Prisma applications using the two-path architecture pattern.
 
 ## When to Use This Skill
 
 Automatically activates when working on:
-- Creating or modifying routes, endpoints, APIs
-- Building controllers, services, repositories
-- Implementing middleware (auth, validation, error handling)
-- Database operations with Prisma
-- Error tracking with Sentry
+- Creating or modifying server actions, server components
+- Implementing RLS policies for Supabase
+- Complex business logic with Prisma transactions
+- Supabase authentication and authorization
 - Input validation with Zod
-- Configuration management
+- Database queries and optimization
+- Error handling patterns
 - Backend testing and refactoring
 
 ---
@@ -27,44 +27,47 @@ Automatically activates when working on:
 
 ### New Backend Feature Checklist
 
-- [ ] **Route**: Clean definition, delegate to controller
-- [ ] **Controller**: Extend BaseController
-- [ ] **Service**: Business logic with DI
-- [ ] **Repository**: Database access (if complex)
+- [ ] **Decision**: RLS or Server Action?
+- [ ] **Auth**: getCurrentUser() check
 - [ ] **Validation**: Zod schema
-- [ ] **Sentry**: Error tracking
+- [ ] **Logic**: Direct or extract to lib/?
+- [ ] **Revalidation**: revalidatePath/revalidateTag
+- [ ] **Error Handling**: Return objects or throw?
 - [ ] **Tests**: Unit + integration tests
 
-### New Microservice Checklist
+### RLS-Only Feature Checklist
 
-- [ ] Directory structure (see [architecture-overview.md](architecture-overview.md))
-- [ ] instrument.ts for Sentry
-- [ ] BaseController class
-- [ ] Middleware stack
-- [ ] Error boundary
-- [ ] Testing framework
+- [ ] RLS policy (SELECT/INSERT/UPDATE/DELETE)
+- [ ] Helper functions (if complex logic)
+- [ ] Client hook (for mutations)
+- [ ] Server action (for SSR data fetching)
+- [ ] Validation (Zod schema)
+
+### Server Action Feature Checklist
+
+- [ ] Server action in actions/
+- [ ] Auth check (getCurrentUser)
+- [ ] Validation (Zod schema)
+- [ ] Business logic (inline or lib/)
+- [ ] Prisma queries or transactions
+- [ ] Revalidation
+- [ ] Error handling
 
 ---
 
 ## Architecture Overview
 
-### Layered Architecture
+### Two-Path Architecture
 
 ```
-HTTP Request
-    ↓
-Routes (routing only)
-    ↓
-Controllers (request handling)
-    ↓
-Services (business logic)
-    ↓
-Repositories (data access)
-    ↓
-Database (Prisma)
+PATH 1: Simple CRUD (RLS)
+Client → Supabase RLS → Database
+
+PATH 2: Complex Logic (Server Actions + Prisma)
+Client → Server Action → Prisma → Database
 ```
 
-**Key Principle:** Each layer has ONE responsibility.
+**Key Decision:** Simple CRUD? → RLS. Complex logic? → Server Action + Prisma.
 
 See [architecture-overview.md](architecture-overview.md) for complete details.
 
@@ -73,103 +76,117 @@ See [architecture-overview.md](architecture-overview.md) for complete details.
 ## Directory Structure
 
 ```
-service/src/
-├── config/              # UnifiedConfig
-├── controllers/         # Request handlers
-├── services/            # Business logic
-├── repositories/        # Data access
-├── routes/              # Route definitions
-├── middleware/          # Express middleware
-├── types/               # TypeScript types
-├── validators/          # Zod schemas
-├── utils/               # Utilities
-├── tests/               # Tests
-├── instrument.ts        # Sentry (FIRST IMPORT)
-├── app.ts               # Express setup
-└── server.ts            # HTTP server
+app/                           # Next.js App Router
+├── (auth)/                    # Route groups
+├── dashboard/
+│   └── page.tsx
+└── api/                       # API routes (webhooks only)
+
+actions/                       # Server actions (flat)
+├── posts.ts                   # Post actions
+├── staff.ts                   # Staff actions
+└── billing.ts                 # Billing actions
+
+lib/
+├── db/                        # Prisma helpers (2x+ reuse)
+│   └── posts.ts
+├── validations/               # Zod schemas
+│   └── post.ts
+├── stripe/                    # Third-party integrations
+└── email/                     # Email helpers
+
+utils/supabase/                # Supabase clients
+├── client.ts                  # Browser client
+├── server.ts                  # Server client
+└── middleware.ts              # Token refresh
 ```
 
-**Naming Conventions:**
-- Controllers: `PascalCase` - `UserController.ts`
-- Services: `camelCase` - `userService.ts`
-- Routes: `camelCase + Routes` - `userRoutes.ts`
-- Repositories: `PascalCase + Repository` - `UserRepository.ts`
+**Key Pattern:** Keep logic in `actions/` until used 2+ times, then extract to `lib/`.
 
 ---
 
 ## Core Principles (7 Key Rules)
 
-### 1. Routes Only Route, Controllers Control
+### 1. Choose the Right Path
 
 ```typescript
-// ❌ NEVER: Business logic in routes
-router.post('/submit', async (req, res) => {
-    // 200 lines of logic
-});
+// ✅ Simple CRUD → RLS
+const { data } = await supabase.from('posts').insert({ title, content })
 
-// ✅ ALWAYS: Delegate to controller
-router.post('/submit', (req, res) => controller.submit(req, res));
-```
-
-### 2. All Controllers Extend BaseController
-
-```typescript
-export class UserController extends BaseController {
-    async getUser(req: Request, res: Response): Promise<void> {
-        try {
-            const user = await this.userService.findById(req.params.id);
-            this.handleSuccess(res, user);
-        } catch (error) {
-            this.handleError(error, res, 'getUser');
-        }
-    }
+// ✅ Complex logic → Server Action + Prisma
+export async function addStaffMember(formData: FormData) {
+    const result = await prisma.$transaction(...)
 }
 ```
 
-### 3. All Errors to Sentry
+### 2. All Server Actions Must Check Auth
+
+```typescript
+// ❌ NEVER: No auth check
+export async function createPost(formData: FormData) {
+    await prisma.post.create(...)
+}
+
+// ✅ ALWAYS: Check auth first
+export async function createPost(formData: FormData) {
+    const user = await getCurrentUser()
+    if (!user) return { success: false, error: 'Unauthorized' }
+    // ...
+}
+```
+
+### 3. Validate All Input with Zod
+
+```typescript
+const schema = z.object({ email: z.string().email() })
+const result = schema.safeParse(data)
+if (!result.success) return { success: false, error: 'Invalid input' }
+```
+
+### 4. Extract to lib/ Only When Reused 2+ Times
+
+```typescript
+// ❌ NEVER: Thin wrappers
+export async function getPost(id: string) {
+    return prisma.post.findUnique({ where: { id } })
+}
+
+// ✅ ALWAYS: Direct in action until reused
+export async function getPost(id: string) {
+    const post = await prisma.post.findUnique({
+        where: { id },
+        include: { author: true }
+    })
+    return post
+}
+```
+
+### 5. Revalidate After Mutations
+
+```typescript
+await prisma.post.create({ data })
+revalidatePath('/posts')  // ← Required!
+```
+
+### 6. Return Error Objects for UX
 
 ```typescript
 try {
-    await operation();
+    const post = await prisma.post.create(...)
+    return { success: true, data: post }
 } catch (error) {
-    Sentry.captureException(error);
-    throw error;
+    return { success: false, error: 'Failed to create post' }
 }
 ```
 
-### 4. Use Configuration Pattern, NEVER Direct process.env
+### 7. Use Transactions for Multi-Step Operations
 
 ```typescript
-// ❌ NEVER
-const timeout = process.env.TIMEOUT_MS;
-
-// ✅ ALWAYS
-import { config } from './config';
-const timeout = config.timeouts.default;
-```
-
-### 5. Validate All Input with Zod
-
-```typescript
-const schema = z.object({ email: z.string().email() });
-const validated = schema.parse(req.body);
-```
-
-### 6. Use Repository Pattern for Data Access
-
-```typescript
-// Service → Repository → Database
-const users = await userRepository.findActive();
-```
-
-### 7. Comprehensive Testing Required
-
-```typescript
-describe('UserService', () => {
-    it('should create user', async () => {
-        expect(user).toBeDefined();
-    });
-});
+await prisma.$transaction(async (tx) => {
+    const user = await tx.user.create({ data: { email } })
+    await tx.organizationMember.create({ data: { userId: user.id } })
+    await tx.auditLog.create({ data: { action: 'USER_ADDED' } })
+})
 ```
 
 ---
@@ -177,30 +194,39 @@ describe('UserService', () => {
 ## Common Imports
 
 ```typescript
-// Express
-import express, { Request, Response, NextFunction, Router } from 'express';
+// Next.js
+import { revalidatePath, revalidateTag } from 'next/cache'
+import { redirect, notFound } from 'next/navigation'
 
 // Validation
-import { z } from 'zod';
+import { z } from 'zod'
 
 // Database
-import { PrismaClient } from '@prisma/client';
-import type { Prisma } from '@prisma/client';
+import { prisma } from '@/lib/prisma'
+import type { Prisma } from '@prisma/client'
 
-// Sentry
-import * as Sentry from '@sentry/node';
+// Supabase
+import { createServerClient } from '@/utils/supabase/server'
+import { createBrowserClient } from '@/utils/supabase/client'
+import { getCurrentUser } from '@/utils/supabase/server'
 
-// Config
-import { config } from './config';
-
-// Middleware
-import { SSOMiddlewareClient } from './middleware/SSOMiddleware';
-import { asyncErrorWrapper } from './middleware/errorBoundary';
+// Auth helpers
+import { requireOrganizationRole } from '@/lib/auth-helpers'
 ```
 
 ---
 
 ## Quick Reference
+
+### When to Use RLS vs Server Actions
+
+| Use Case | Path | Why |
+|----------|------|-----|
+| List posts | RLS | Simple read |
+| Update profile | RLS | User owns resource |
+| Add staff member | Server Action | Complex auth + transaction |
+| Subscribe to plan | Server Action | Third-party (Stripe) |
+| Real-time chat | RLS | Needs subscriptions |
 
 ### HTTP Status Codes
 
@@ -214,83 +240,35 @@ import { asyncErrorWrapper } from './middleware/errorBoundary';
 | 404 | Not Found |
 | 500 | Server Error |
 
-### Service Templates
-
-**Blog API** (✅ Mature) - Use as template for REST APIs
-**Auth Service** (✅ Mature) - Use as template for authentication patterns
-
 ---
 
 ## Anti-Patterns to Avoid
 
-❌ Business logic in routes
-❌ Direct process.env usage (use config pattern)
-❌ Missing error handling
-❌ No input validation
-❌ Direct Prisma usage (use repositories)
-❌ console.log instead of Sentry
-
----
-
-## Navigation Guide
-
-| Need to... | Read this |
-|------------|-----------|
-| Understand architecture | [architecture-overview.md](architecture-overview.md) |
-| Create routes/controllers | [routing-and-controllers.md](routing-and-controllers.md) |
-| Organize business logic | [services-and-repositories.md](services-and-repositories.md) |
-| Validate input | [validation-patterns.md](validation-patterns.md) |
-| Add error tracking | [sentry-and-monitoring.md](sentry-and-monitoring.md) |
-| Create middleware | [middleware-guide.md](middleware-guide.md) |
-| Database access | [database-patterns.md](database-patterns.md) |
-| Handle async/errors | [async-and-errors.md](async-and-errors.md) |
-| Write tests | [testing-guide.md](testing-guide.md) |
-| See examples | [complete-examples.md](complete-examples.md) |
+❌ No auth check in server actions
+❌ Missing input validation
+❌ Thin wrapper functions in lib/
+❌ Using Prisma in middleware
+❌ Forgetting revalidatePath
+❌ Exposing sensitive errors to client
 
 ---
 
 ## Resource Files
 
-### [architecture-overview.md](architecture-overview.md)
-Layered architecture, request lifecycle, separation of concerns
-
-### [routing-and-controllers.md](routing-and-controllers.md)
-Route definitions, BaseController, error handling, examples
-
-### [services-and-repositories.md](services-and-repositories.md)
-Service patterns, DI, repository pattern, caching
-
-### [validation-patterns.md](validation-patterns.md)
-Zod schemas, validation, DTO pattern
-
-### [sentry-and-monitoring.md](sentry-and-monitoring.md)
-Sentry init, error capture, performance monitoring
-
-### [middleware-guide.md](middleware-guide.md)
-Auth, audit, error boundaries, AsyncLocalStorage
-
-### [database-patterns.md](database-patterns.md)
-PrismaService, repositories, transactions, optimization
-
-### [async-and-errors.md](async-and-errors.md)
-Async patterns, custom errors, asyncErrorWrapper
-
-### [testing-guide.md](testing-guide.md)
-Unit/integration tests, mocking, coverage
-
-### [complete-examples.md](complete-examples.md)
-Full examples, refactoring guide
-
----
-
-## Related Skills
-
-- **database-verification** - Verify column names and schema consistency
-- **error-tracking** - Sentry integration patterns
-- **skill-developer** - Meta-skill for creating and managing skills
+| Need to... | Read this |
+|------------|-----------|
+| Understand two-path architecture | [architecture-overview.md](architecture-overview.md) - RLS vs Server Actions, when to use each |
+| Create server actions | [routing-and-controllers.md](routing-and-controllers.md) - Server actions, helper functions, patterns |
+| Extract reusable logic | [services-and-repositories.md](services-and-repositories.md) - When to extract to lib/, services pattern |
+| Validate input | [validation-patterns.md](validation-patterns.md) - Zod schemas, FormData parsing, error handling |
+| Handle auth/middleware | [middleware-guide.md](middleware-guide.md) - Supabase auth, token refresh, route protection |
+| Query with Prisma | [database-patterns.md](database-patterns.md) - Transactions, parallel queries, N+1 prevention |
+| Handle async/errors | [async-and-errors.md](async-and-errors.md) - Error boundaries, custom errors, Prisma errors |
+| Write tests | [testing-guide.md](testing-guide.md) - Unit/integration tests, mocking |
+| See full examples | [complete-examples.md](complete-examples.md) - Complete patterns, refactoring guide |
 
 ---
 
 **Skill Status**: COMPLETE ✅
-**Line Count**: < 500 ✅
-**Progressive Disclosure**: 10 resource files ✅
+**Line Count**: < 300 ✅
+**Progressive Disclosure**: 9 resource files ✅

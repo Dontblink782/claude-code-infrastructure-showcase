@@ -1,262 +1,476 @@
 # Component Patterns
 
-Modern React component architecture for the application emphasizing type safety, lazy loading, and Suspense boundaries.
+Modern Next.js 15 App Router component architecture emphasizing Server Components, Client Components, and ShadCN UI composition patterns.
 
 ---
 
-## React.FC Pattern (PREFERRED)
+## Server Components vs Client Components
 
-### Why React.FC
+### The Default: Server Components
 
-All components use the `React.FC<Props>` pattern for:
-- Explicit type safety for props
-- Consistent component signatures
-- Clear prop interface documentation
-- Better IDE autocomplete
+**Next.js 15 App Router makes Server Components the default.** All components are Server Components unless you add `'use client'` directive.
 
-### Basic Pattern
+**Server Components characteristics:**
+- Render on the server only
+- Can be `async` functions
+- Can directly access databases, file system, server-only APIs
+- Cannot use React hooks (useState, useEffect, etc.)
+- Cannot use browser APIs
+- Automatic code splitting and streaming
+
+**When to use Server Components:**
+- Fetching data from database/APIs
+- Accessing backend resources
+- Keeping sensitive data on server (API keys, tokens)
+- Reducing client bundle size
+- Static content that doesn't need interactivity
+
+**Basic Server Component Pattern:**
 
 ```typescript
-import React from 'react';
+// app/orders/page.tsx
+import { getOrders } from '@/actions/orders';
+import { OrdersTable } from '@/features/orders/components/OrdersTable';
 
-interface MyComponentProps {
-    /** User ID to display */
-    userId: number;
-    /** Optional callback when action occurs */
-    onAction?: () => void;
-}
+export default async function OrdersPage() {
+    // Fetch data directly in component
+    const orders = await getOrders();
 
-export const MyComponent: React.FC<MyComponentProps> = ({ userId, onAction }) => {
     return (
-        <div>
-            User: {userId}
+        <div className="container mx-auto py-8">
+            <h1 className="text-3xl font-bold mb-6">Orders</h1>
+            <OrdersTable orders={orders} />
         </div>
     );
-};
-
-export default MyComponent;
+}
 ```
 
 **Key Points:**
-- Props interface defined separately with JSDoc comments
-- `React.FC<Props>` provides type safety
-- Destructure props in parameters
-- Default export at bottom
+- Component is async function
+- No 'use client' directive
+- Directly calls server action
+- Passes data as props to presentational components
 
 ---
 
-## Lazy Loading Pattern
+### Client Components
 
-### When to Lazy Load
+**Client Components** run in the browser and enable interactivity. Add `'use client'` directive at the top of the file.
 
-Lazy load components that are:
-- Heavy (DataGrid, charts, rich text editors)
-- Route-level components
-- Modal/dialog content (not shown initially)
-- Below-the-fold content
+**Client Components characteristics:**
+- Render on client (browser)
+- Can use React hooks (useState, useEffect, useContext, etc.)
+- Can use browser APIs (window, document, localStorage)
+- Handle user interactions (onClick, onChange, etc.)
+- Cannot be async functions
+- Cannot directly access server-only resources
 
-### How to Lazy Load
+**When to use Client Components:**
+- Interactive UI (forms, buttons, inputs)
+- Event listeners (onClick, onChange, onSubmit)
+- React hooks (state, effects, context)
+- Browser APIs (localStorage, geolocation, etc.)
+- Third-party libraries that use browser APIs
 
-```typescript
-import React from 'react';
-
-// Lazy load heavy component
-const PostDataGrid = React.lazy(() =>
-    import('./grids/PostDataGrid')
-);
-
-// For named exports
-const MyComponent = React.lazy(() =>
-    import('./MyComponent').then(module => ({
-        default: module.MyComponent
-    }))
-);
-```
-
-**Example from PostTable.tsx:**
+**Basic Client Component Pattern:**
 
 ```typescript
-/**
- * Main post table container component
- */
-import React, { useState, useCallback } from 'react';
-import { Box, Paper } from '@mui/material';
+// features/orders/components/OrdersTable.tsx
+'use client';
 
-// Lazy load PostDataGrid to optimize bundle size
-const PostDataGrid = React.lazy(() => import('./grids/PostDataGrid'));
+import { useState } from 'react';
+import {
+    Table,
+    TableBody,
+    TableCell,
+    TableHead,
+    TableHeader,
+    TableRow,
+} from '@/components/ui/table';
+import { OrderPaymentBadge } from './badges/OrderPaymentBadge';
+import type { Order } from '@/types/order';
 
-import { SuspenseLoader } from '~components/SuspenseLoader';
+interface OrdersTableProps {
+    orders: Order[];
+}
 
-export const PostTable: React.FC<PostTableProps> = ({ formId }) => {
+export function OrdersTable({ orders }: OrdersTableProps) {
+    const [selectedId, setSelectedId] = useState<string | null>(null);
+
     return (
-        <Box>
-            <SuspenseLoader>
-                <PostDataGrid formId={formId} />
-            </SuspenseLoader>
-        </Box>
-    );
-};
-
-export default PostTable;
-```
-
----
-
-## Suspense Boundaries
-
-### SuspenseLoader Component
-
-**Import:**
-```typescript
-import { SuspenseLoader } from '~components/SuspenseLoader';
-// Or
-import { SuspenseLoader } from '@/components/SuspenseLoader';
-```
-
-**Usage:**
-```typescript
-<SuspenseLoader>
-    <LazyLoadedComponent />
-</SuspenseLoader>
-```
-
-**What it does:**
-- Shows loading indicator while lazy component loads
-- Smooth fade-in animation
-- Consistent loading experience
-- Prevents layout shift
-
-### Where to Place Suspense Boundaries
-
-**Route Level:**
-```typescript
-// routes/my-route/index.tsx
-const MyPage = lazy(() => import('@/features/my-feature/components/MyPage'));
-
-function Route() {
-    return (
-        <SuspenseLoader>
-            <MyPage />
-        </SuspenseLoader>
+        <Table>
+            <TableHeader>
+                <TableRow>
+                    <TableHead>Order ID</TableHead>
+                    <TableHead>Customer</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Amount</TableHead>
+                </TableRow>
+            </TableHeader>
+            <TableBody>
+                {orders.map((order) => (
+                    <TableRow
+                        key={order.id}
+                        onClick={() => setSelectedId(order.id)}
+                        className="cursor-pointer hover:bg-muted/50"
+                    >
+                        <TableCell>{order.id}</TableCell>
+                        <TableCell>{order.customerName}</TableCell>
+                        <TableCell>
+                            <OrderPaymentBadge status={order.paymentStatus} />
+                        </TableCell>
+                        <TableCell>${order.amount}</TableCell>
+                    </TableRow>
+                ))}
+            </TableBody>
+        </Table>
     );
 }
 ```
 
-**Component Level:**
-```typescript
-function ParentComponent() {
-    return (
-        <Box>
-            <Header />
-            <SuspenseLoader>
-                <HeavyDataGrid />
-            </SuspenseLoader>
-        </Box>
-    );
-}
-```
-
-**Multiple Boundaries:**
-```typescript
-function Page() {
-    return (
-        <Box>
-            <SuspenseLoader>
-                <HeaderSection />
-            </SuspenseLoader>
-
-            <SuspenseLoader>
-                <MainContent />
-            </SuspenseLoader>
-
-            <SuspenseLoader>
-                <Sidebar />
-            </SuspenseLoader>
-        </Box>
-    );
-}
-```
-
-Each section loads independently, better UX.
+**Key Points:**
+- `'use client'` directive at top
+- Uses `useState` hook for interactivity
+- Receives data via props (from Server Component)
+- Handles user interactions
 
 ---
 
-## Component Structure Template
+### Server/Client Boundary Rules
 
-### Recommended Order
+**Data Flow:**
+```
+Server Component (async, fetches data)
+    ↓ (props)
+Client Component (interactive, receives data)
+```
+
+**Important Rules:**
+1. **Server can render Client**, but Client cannot render Server
+2. **Pass serializable props only** (JSON-compatible: strings, numbers, arrays, objects)
+3. **Cannot pass functions** from Server to Client (use Server Actions instead)
+4. **Client Components stop "server-ness"** - all children become Client Components unless imported separately
+
+**Example - Server renders Client:**
+
+```typescript
+// app/dashboard/page.tsx (Server Component)
+import { getStats } from '@/actions/stats';
+import { StatsCard } from '@/features/dashboard/components/StatsCard'; // Client
+
+export default async function DashboardPage() {
+    const stats = await getStats();
+
+    return (
+        <div>
+            {/* Server Component rendering Client Component */}
+            <StatsCard data={stats} />
+        </div>
+    );
+}
+```
+
+**Example - Client renders Server (via children pattern):**
+
+```typescript
+// features/layout/ClientLayout.tsx
+'use client';
+
+import { useState } from 'react';
+
+interface ClientLayoutProps {
+    children: React.ReactNode; // Can be Server Component!
+}
+
+export function ClientLayout({ children }: ClientLayoutProps) {
+    const [isOpen, setIsOpen] = useState(true);
+
+    return (
+        <div className={isOpen ? 'sidebar-open' : 'sidebar-closed'}>
+            {/* children can still be Server Components */}
+            {children}
+        </div>
+    );
+}
+
+// app/page.tsx (Server Component)
+import { ClientLayout } from '@/features/layout/ClientLayout';
+
+export default async function Page() {
+    const data = await fetchData(); // Server-side fetch
+
+    return (
+        <ClientLayout>
+            {/* This is still a Server Component! */}
+            <ServerContent data={data} />
+        </ClientLayout>
+    );
+}
+```
+
+---
+
+## ShadCN UI Wrapper Pattern
+
+### The Problem: Large Component Trees
+
+When using ShadCN base components directly, you end up importing the same component repeatedly and duplicating styling logic:
+
+```typescript
+// ❌ AVOID - Repeated imports and logic
+import { Badge } from '@/components/ui/badge';
+
+// In 10 different files:
+<Badge variant="default" className="bg-green-500">Paid</Badge>
+<Badge variant="default" className="bg-red-500">Unpaid</Badge>
+```
+
+### The Solution: Wrapper Components
+
+**Create wrapper components** that encapsulate ShadCN base components with domain-specific logic:
+
+```typescript
+// features/orders/components/badges/OrderPaymentBadge.tsx
+import { Badge } from '@/components/ui/badge';
+
+interface OrderPaymentBadgeProps {
+    status: 'paid' | 'unpaid' | 'pending';
+}
+
+export function OrderPaymentBadge({ status }: OrderPaymentBadgeProps) {
+    const config = {
+        paid: {
+            label: 'Paid',
+            className: 'bg-green-500 hover:bg-green-600 text-white',
+        },
+        unpaid: {
+            label: 'Unpaid',
+            className: 'bg-red-500 hover:bg-red-600 text-white',
+        },
+        pending: {
+            label: 'Pending',
+            className: 'bg-yellow-500 hover:bg-yellow-600 text-white',
+        },
+    };
+
+    const { label, className } = config[status];
+
+    return <Badge className={className}>{label}</Badge>;
+}
+```
+
+**Usage - Clean and simple:**
+
+```typescript
+// Now in components:
+<OrderPaymentBadge status="paid" />
+<OrderPaymentBadge status="unpaid" />
+```
+
+**Benefits:**
+- Single source of truth for styling
+- Type-safe props
+- Domain-specific naming
+- Easy to change globally
+- Reduces bundle size (one Badge import internally)
+
+---
+
+### Wrapper Pattern Examples
+
+**Button Wrapper:**
+
+```typescript
+// features/orders/components/buttons/OrderActionButton.tsx
+import { Button } from '@/components/ui/button';
+import { Check, X, Clock } from 'lucide-react';
+
+interface OrderActionButtonProps {
+    action: 'approve' | 'reject' | 'pending';
+    onClick: () => void;
+    disabled?: boolean;
+}
+
+export function OrderActionButton({
+    action,
+    onClick,
+    disabled
+}: OrderActionButtonProps) {
+    const config = {
+        approve: {
+            label: 'Approve Order',
+            icon: Check,
+            variant: 'default' as const,
+            className: 'bg-green-600 hover:bg-green-700',
+        },
+        reject: {
+            label: 'Reject Order',
+            icon: X,
+            variant: 'destructive' as const,
+        },
+        pending: {
+            label: 'Mark Pending',
+            icon: Clock,
+            variant: 'outline' as const,
+        },
+    };
+
+    const { label, icon: Icon, variant, className } = config[action];
+
+    return (
+        <Button
+            variant={variant}
+            onClick={onClick}
+            disabled={disabled}
+            className={className}
+        >
+            <Icon className="mr-2 h-4 w-4" />
+            {label}
+        </Button>
+    );
+}
+```
+
+**Card Wrapper:**
+
+```typescript
+// features/dashboard/components/cards/StatCard.tsx
+import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
+import { LucideIcon } from 'lucide-react';
+
+interface StatCardProps {
+    title: string;
+    value: string | number;
+    icon: LucideIcon;
+    trend?: {
+        value: number;
+        isPositive: boolean;
+    };
+}
+
+export function StatCard({ title, value, icon: Icon, trend }: StatCardProps) {
+    return (
+        <Card>
+            <CardHeader className="flex flex-row items-center justify-between pb-2">
+                <CardTitle className="text-sm font-medium text-muted-foreground">
+                    {title}
+                </CardTitle>
+                <Icon className="h-4 w-4 text-muted-foreground" />
+            </CardHeader>
+            <CardContent>
+                <div className="text-2xl font-bold">{value}</div>
+                {trend && (
+                    <p className={`text-xs ${trend.isPositive ? 'text-green-600' : 'text-red-600'}`}>
+                        {trend.isPositive ? '+' : '-'}{Math.abs(trend.value)}% from last month
+                    </p>
+                )}
+            </CardContent>
+        </Card>
+    );
+}
+```
+
+---
+
+### Hybrid Location Strategy
+
+**Where to put wrapper components?**
+
+**Start in features/ directory:**
+```
+features/
+  orders/
+    components/
+      badges/
+        OrderPaymentBadge.tsx
+      buttons/
+        OrderActionButton.tsx
+```
+
+**Move to components/ when used 3+ times:**
+
+If `OrderPaymentBadge` is used in:
+- Orders page
+- Invoice page
+- Payment history page
+
+**Then move to shared:**
+```
+components/
+  domain/
+    badges/
+      OrderPaymentBadge.tsx
+```
+
+**Update imports:**
+```typescript
+// Before (feature-specific)
+import { OrderPaymentBadge } from '@/features/orders/components/badges/OrderPaymentBadge';
+
+// After (shared)
+import { OrderPaymentBadge } from '@/components/domain/badges/OrderPaymentBadge';
+```
+
+**Why this pattern?**
+- Avoids premature abstraction
+- Components start domain-specific
+- Natural evolution to shared components
+- Easy to refactor when needed
+
+---
+
+## Component Structure & Organization
+
+### Recommended File Structure
 
 ```typescript
 /**
  * Component description
  * What it does, when to use it
  */
-import React, { useState, useCallback, useMemo, useEffect } from 'react';
-import { Box, Paper, Button } from '@mui/material';
-import type { SxProps, Theme } from '@mui/material';
-import { useSuspenseQuery } from '@tanstack/react-query';
 
-// Feature imports
-import { myFeatureApi } from '../api/myFeatureApi';
-import type { MyData } from '~types/myData';
+// 1. CLIENT DIRECTIVE (if needed)
+'use client';
 
-// Component imports
-import { SuspenseLoader } from '~components/SuspenseLoader';
+// 2. IMPORTS
+// React
+import { useState, useCallback, useEffect } from 'react';
+
+// ShadCN Components
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Card } from '@/components/ui/card';
+
+// Custom Components
+import { OrderPaymentBadge } from './badges/OrderPaymentBadge';
 
 // Hooks
-import { useAuth } from '@/hooks/useAuth';
-import { useMuiSnackbar } from '@/hooks/useMuiSnackbar';
+import { useSearchOrders } from '../hooks/useSearchOrders';
 
-// 1. PROPS INTERFACE (with JSDoc)
-interface MyComponentProps {
-    /** The ID of the entity to display */
-    entityId: number;
-    /** Optional callback when action completes */
-    onComplete?: () => void;
-    /** Display mode */
-    mode?: 'view' | 'edit';
+// Types
+import type { Order } from '@/types/order';
+
+// 3. PROPS INTERFACE
+interface OrdersTableProps {
+    /** Initial orders to display */
+    orders: Order[];
+    /** Callback when order is selected */
+    onOrderSelect?: (orderId: string) => void;
 }
 
-// 2. STYLES (if inline and <100 lines)
-const componentStyles: Record<string, SxProps<Theme>> = {
-    container: {
-        p: 2,
-        display: 'flex',
-        flexDirection: 'column',
-    },
-    header: {
-        mb: 2,
-        display: 'flex',
-        justifyContent: 'space-between',
-    },
-};
+// 4. COMPONENT
+export function OrdersTable({ orders, onOrderSelect }: OrdersTableProps) {
+    // Hooks first
+    const [selectedId, setSelectedId] = useState<string | null>(null);
+    const { searchOrders, results, isSearching } = useSearchOrders();
 
-// 3. COMPONENT DEFINITION
-export const MyComponent: React.FC<MyComponentProps> = ({
-    entityId,
-    onComplete,
-    mode = 'view',
-}) => {
-    // 4. HOOKS (in this order)
-    // - Context hooks first
-    const { user } = useAuth();
-    const { showSuccess, showError } = useMuiSnackbar();
+    // Event handlers (useCallback if passed to children)
+    const handleSelect = useCallback((id: string) => {
+        setSelectedId(id);
+        onOrderSelect?.(id);
+    }, [onOrderSelect]);
 
-    // - Data fetching
-    const { data } = useSuspenseQuery({
-        queryKey: ['myEntity', entityId],
-        queryFn: () => myFeatureApi.getEntity(entityId),
-    });
-
-    // - Local state
-    const [selectedItem, setSelectedItem] = useState<string | null>(null);
-    const [isEditing, setIsEditing] = useState(mode === 'edit');
-
-    // - Memoized values
-    const filteredData = useMemo(() => {
-        return data.filter(item => item.active);
-    }, [data]);
-
-    // - Effects
+    // Effects
     useEffect(() => {
         // Setup
         return () => {
@@ -264,222 +478,199 @@ export const MyComponent: React.FC<MyComponentProps> = ({
         };
     }, []);
 
-    // 5. EVENT HANDLERS (with useCallback)
-    const handleItemSelect = useCallback((itemId: string) => {
-        setSelectedItem(itemId);
-    }, []);
-
-    const handleSave = useCallback(async () => {
-        try {
-            await myFeatureApi.updateEntity(entityId, { /* data */ });
-            showSuccess('Entity updated successfully');
-            onComplete?.();
-        } catch (error) {
-            showError('Failed to update entity');
-        }
-    }, [entityId, onComplete, showSuccess, showError]);
-
-    // 6. RENDER
+    // Render
     return (
-        <Box sx={componentStyles.container}>
-            <Box sx={componentStyles.header}>
-                <h2>My Component</h2>
-                <Button onClick={handleSave}>Save</Button>
-            </Box>
-
-            <Paper sx={{ p: 2 }}>
-                {filteredData.map(item => (
-                    <div key={item.id}>{item.name}</div>
-                ))}
-            </Paper>
-        </Box>
-    );
-};
-
-// 7. EXPORT (default export at bottom)
-export default MyComponent;
-```
-
----
-
-## Component Separation
-
-### When to Split Components
-
-**Split into multiple components when:**
-- Component exceeds 300 lines
-- Multiple distinct responsibilities
-- Reusable sections
-- Complex nested JSX
-
-**Example:**
-
-```typescript
-// ❌ AVOID - Monolithic
-function MassiveComponent() {
-    // 500+ lines
-    // Search logic
-    // Filter logic
-    // Grid logic
-    // Action panel logic
-}
-
-// ✅ PREFERRED - Modular
-function ParentContainer() {
-    return (
-        <Box>
-            <SearchAndFilter onFilter={handleFilter} />
-            <DataGrid data={filteredData} />
-            <ActionPanel onAction={handleAction} />
-        </Box>
-    );
-}
-```
-
-### When to Keep Together
-
-**Keep in same file when:**
-- Component < 200 lines
-- Tightly coupled logic
-- Not reusable elsewhere
-- Simple presentation component
-
----
-
-## Export Patterns
-
-### Named Const + Default Export (PREFERRED)
-
-```typescript
-export const MyComponent: React.FC<Props> = ({ ... }) => {
-    // Component logic
-};
-
-export default MyComponent;
-```
-
-**Why:**
-- Named export for testing/refactoring
-- Default export for lazy loading convenience
-- Both options available to consumers
-
-### Lazy Loading Named Exports
-
-```typescript
-const MyComponent = React.lazy(() =>
-    import('./MyComponent').then(module => ({
-        default: module.MyComponent
-    }))
-);
-```
-
----
-
-## Component Communication
-
-### Props Down, Events Up
-
-```typescript
-// Parent
-function Parent() {
-    const [selectedId, setSelectedId] = useState<string | null>(null);
-
-    return (
-        <Child
-            data={data}                    // Props down
-            onSelect={setSelectedId}       // Events up
-        />
-    );
-}
-
-// Child
-interface ChildProps {
-    data: Data[];
-    onSelect: (id: string) => void;
-}
-
-export const Child: React.FC<ChildProps> = ({ data, onSelect }) => {
-    return (
-        <div onClick={() => onSelect(data[0].id)}>
-            {/* Content */}
+        <div className="space-y-4">
+            {/* Component JSX */}
         </div>
     );
-};
-```
-
-### Avoid Prop Drilling
-
-**Use context for deep nesting:**
-```typescript
-// ❌ AVOID - Prop drilling 5+ levels
-<A prop={x}>
-  <B prop={x}>
-    <C prop={x}>
-      <D prop={x}>
-        <E prop={x} />  // Finally uses it here
-      </D>
-    </C>
-  </B>
-</A>
-
-// ✅ PREFERRED - Context or TanStack Query
-const MyContext = createContext<MyData | null>(null);
-
-function Provider({ children }) {
-    const { data } = useSuspenseQuery({ ... });
-    return <MyContext.Provider value={data}>{children}</MyContext.Provider>;
-}
-
-function DeepChild() {
-    const data = useContext(MyContext);
-    // Use data directly
 }
 ```
 
 ---
 
-## Advanced Patterns
+## Component Composition Patterns
 
 ### Compound Components
 
 ```typescript
-// Card.tsx
-export const Card: React.FC<CardProps> & {
-    Header: typeof CardHeader;
-    Body: typeof CardBody;
-    Footer: typeof CardFooter;
-} = ({ children }) => {
-    return <Paper>{children}</Paper>;
+// components/ui/card-group/CardGroup.tsx
+interface CardGroupProps {
+    children: React.ReactNode;
+}
+
+export function CardGroup({ children }: CardGroupProps) {
+    return <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">{children}</div>;
+}
+
+// Subcomponents
+CardGroup.Item = function CardGroupItem({ children }: { children: React.ReactNode }) {
+    return <Card className="p-4">{children}</Card>;
 };
 
-Card.Header = CardHeader;
-Card.Body = CardBody;
-Card.Footer = CardFooter;
-
 // Usage
-<Card>
-    <Card.Header>Title</Card.Header>
-    <Card.Body>Content</Card.Body>
-    <Card.Footer>Actions</Card.Footer>
-</Card>
+<CardGroup>
+    <CardGroup.Item>Card 1</CardGroup.Item>
+    <CardGroup.Item>Card 2</CardGroup.Item>
+    <CardGroup.Item>Card 3</CardGroup.Item>
+</CardGroup>
 ```
 
 ### Render Props (Rare, but useful)
 
 ```typescript
-interface DataProviderProps {
-    children: (data: Data) => React.ReactNode;
+interface DataProviderProps<T> {
+    data: T[];
+    children: (data: T[], loading: boolean) => React.ReactNode;
 }
 
-export const DataProvider: React.FC<DataProviderProps> = ({ children }) => {
-    const { data } = useSuspenseQuery({ ... });
-    return <>{children(data)}</>;
-};
+export function DataProvider<T>({ data, children }: DataProviderProps<T>) {
+    const [loading, setLoading] = useState(false);
+
+    return <>{children(data, loading)}</>;
+}
 
 // Usage
-<DataProvider>
-    {(data) => <Display data={data} />}
+<DataProvider data={orders}>
+    {(data, loading) => (
+        loading ? <LoadingSkeleton /> : <OrdersList orders={data} />
+    )}
 </DataProvider>
+```
+
+---
+
+## Styling with Tailwind
+
+### Inline Classes (Preferred)
+
+```typescript
+export function OrderCard({ order }: OrderCardProps) {
+    return (
+        <Card className="p-6 hover:shadow-lg transition-shadow">
+            <h3 className="text-xl font-semibold mb-2">{order.title}</h3>
+            <p className="text-muted-foreground">{order.description}</p>
+        </Card>
+    );
+}
+```
+
+### Conditional Classes with cn() Helper
+
+```typescript
+import { cn } from '@/lib/utils';
+
+export function OrderBadge({ status }: OrderBadgeProps) {
+    return (
+        <Badge
+            className={cn(
+                'font-medium',
+                status === 'paid' && 'bg-green-500 text-white',
+                status === 'unpaid' && 'bg-red-500 text-white',
+                status === 'pending' && 'bg-yellow-500 text-white'
+            )}
+        >
+            {status}
+        </Badge>
+    );
+}
+```
+
+### Extract to const for Reusability
+
+```typescript
+const cardStyles = {
+    base: 'rounded-lg border bg-card text-card-foreground shadow-sm',
+    hover: 'hover:shadow-md transition-shadow',
+    variants: {
+        default: 'border-border',
+        primary: 'border-primary',
+        destructive: 'border-destructive',
+    },
+};
+
+export function CustomCard({ variant = 'default', children }: CustomCardProps) {
+    return (
+        <div className={cn(cardStyles.base, cardStyles.hover, cardStyles.variants[variant])}>
+            {children}
+        </div>
+    );
+}
+```
+
+---
+
+## Data Flow Patterns
+
+### Container/Presentation Pattern
+
+**Container (Server Component):**
+Fetches data, handles business logic, passes to presentational components.
+
+```typescript
+// app/orders/page.tsx
+import { getOrders } from '@/actions/orders';
+import { OrdersTable } from '@/features/orders/components/OrdersTable';
+
+export default async function OrdersPage() {
+    const orders = await getOrders();
+
+    return (
+        <div className="container">
+            <h1>Orders</h1>
+            <OrdersTable orders={orders} />
+        </div>
+    );
+}
+```
+
+**Presentation (Client Component):**
+Receives data as props, handles UI and interactions.
+
+```typescript
+// features/orders/components/OrdersTable.tsx
+'use client';
+
+interface OrdersTableProps {
+    orders: Order[];
+}
+
+export function OrdersTable({ orders }: OrdersTableProps) {
+    // UI logic only
+    return <Table>...</Table>;
+}
+```
+
+### Props Down, Events Up
+
+```typescript
+// Parent
+function OrdersPage() {
+    const handleOrderSelect = (id: string) => {
+        console.log('Selected:', id);
+    };
+
+    return (
+        <OrdersTable
+            orders={orders}                    // Props down
+            onOrderSelect={handleOrderSelect}  // Events up
+        />
+    );
+}
+
+// Child
+interface OrdersTableProps {
+    orders: Order[];
+    onOrderSelect: (id: string) => void;
+}
+
+export function OrdersTable({ orders, onOrderSelect }: OrdersTableProps) {
+    return (
+        <div onClick={() => onOrderSelect(orders[0].id)}>
+            {/* Content */}
+        </div>
+    );
+}
 ```
 
 ---
@@ -487,16 +678,17 @@ export const DataProvider: React.FC<DataProviderProps> = ({ children }) => {
 ## Summary
 
 **Modern Component Recipe:**
-1. `React.FC<Props>` with TypeScript
-2. Lazy load if heavy: `React.lazy(() => import())`
-3. Wrap in `<SuspenseLoader>` for loading
-4. Use `useSuspenseQuery` for data
-5. Import aliases (@/, ~types, ~components)
-6. Event handlers with `useCallback`
-7. Default export at bottom
-8. No early returns for loading states
+
+1. **Default to Server Components** - async, fetch data directly
+2. **Use 'use client' sparingly** - only for interactivity
+3. **ShadCN Wrapper Pattern** - avoid large component imports
+4. **Hybrid Location** - features/ first, components/ at 3+ uses
+5. **Tailwind for Styling** - inline classes, cn() for conditionals
+6. **Container/Presentation** - page.tsx fetches, components present
+7. **Props down, events up** - clear data flow
 
 **See Also:**
-- [data-fetching.md](data-fetching.md) - useSuspenseQuery details
-- [loading-and-error-states.md](loading-and-error-states.md) - Suspense best practices
+- [data-fetching.md](data-fetching.md) - Server Actions and data patterns
+- [file-organization.md](file-organization.md) - Directory structure
+- [shadcn-patterns.md](shadcn-patterns.md) - Advanced ShadCN patterns
 - [complete-examples.md](complete-examples.md) - Full working examples

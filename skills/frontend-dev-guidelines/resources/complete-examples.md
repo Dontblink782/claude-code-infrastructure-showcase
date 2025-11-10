@@ -1,857 +1,758 @@
 # Complete Examples
 
-Full working examples combining all modern patterns: React.FC, lazy loading, Suspense, useSuspenseQuery, styling, routing, and error handling.
+Full working examples combining Next.js 15 App Router patterns: Server Components, Server Actions, Client Components, ShadCN UI, form handling, and data fetching.
 
 ---
 
-## Example 1: Complete Modern Component
+## Example 1: Complete Server Component Page
 
-Combines: React.FC, useSuspenseQuery, cache-first, useCallback, styling, error handling
+Combines: async Server Component, data fetching, parallel requests, error handling
 
 ```typescript
-/**
- * User profile display component
- * Demonstrates modern patterns with Suspense and TanStack Query
- */
-import React, { useState, useCallback, useMemo } from 'react';
-import { Box, Paper, Typography, Button, Avatar } from '@mui/material';
-import type { SxProps, Theme } from '@mui/material';
-import { useSuspenseQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { userApi } from '../api/userApi';
-import { useMuiSnackbar } from '@/hooks/useMuiSnackbar';
-import type { User } from '~types/user';
+// app/users/[userId]/page.tsx
+import { Suspense } from 'react';
+import { notFound } from 'next/navigation';
+import { UserProfile } from '@/features/users/components/user-profile';
+import { UserActivity } from '@/features/users/components/user-activity';
+import { Skeleton } from '@/components/ui/skeleton';
 
-// Styles object
-const componentStyles: Record<string, SxProps<Theme>> = {
-    container: {
-        p: 3,
-        maxWidth: 600,
-        margin: '0 auto',
-    },
-    header: {
-        display: 'flex',
-        alignItems: 'center',
-        gap: 2,
-        mb: 3,
-    },
-    content: {
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 2,
-    },
-    actions: {
-        display: 'flex',
-        gap: 1,
-        mt: 2,
-    },
-};
-
-interface UserProfileProps {
-    userId: string;
-    onUpdate?: () => void;
+interface PageProps {
+    params: { userId: string };
 }
 
-export const UserProfile: React.FC<UserProfileProps> = ({ userId, onUpdate }) => {
-    const queryClient = useQueryClient();
-    const { showSuccess, showError } = useMuiSnackbar();
-    const [isEditing, setIsEditing] = useState(false);
-
-    // Suspense query - no isLoading needed!
-    const { data: user } = useSuspenseQuery({
-        queryKey: ['user', userId],
-        queryFn: () => userApi.getUser(userId),
-        staleTime: 5 * 60 * 1000,
+async function getUser(userId: string) {
+    const res = await fetch(`${process.env.API_URL}/users/${userId}`, {
+        next: { revalidate: 300 }, // Cache for 5 minutes
     });
 
-    // Update mutation
-    const updateMutation = useMutation({
-        mutationFn: (updates: Partial<User>) =>
-            userApi.updateUser(userId, updates),
+    if (!res.ok) {
+        if (res.status === 404) notFound();
+        throw new Error('Failed to fetch user');
+    }
 
-        onSuccess: () => {
-            queryClient.invalidateQueries({ queryKey: ['user', userId] });
-            showSuccess('Profile updated');
-            setIsEditing(false);
-            onUpdate?.();
-        },
+    return res.json();
+}
 
-        onError: () => {
-            showError('Failed to update profile');
-        },
+async function getUserActivity(userId: string) {
+    const res = await fetch(`${process.env.API_URL}/users/${userId}/activity`, {
+        next: { revalidate: 60 }, // Cache for 1 minute
     });
 
-    // Memoized computed value
-    const fullName = useMemo(() => {
-        return `${user.firstName} ${user.lastName}`;
-    }, [user.firstName, user.lastName]);
+    if (!res.ok) {
+        throw new Error('Failed to fetch activity');
+    }
 
-    // Event handlers with useCallback
-    const handleEdit = useCallback(() => {
-        setIsEditing(true);
-    }, []);
+    return res.json();
+}
 
-    const handleSave = useCallback(() => {
-        updateMutation.mutate({
-            firstName: user.firstName,
-            lastName: user.lastName,
-        });
-    }, [user, updateMutation]);
-
-    const handleCancel = useCallback(() => {
-        setIsEditing(false);
-    }, []);
+export default async function UserPage({ params }: PageProps) {
+    // Fetch user data first (required)
+    const user = await getUser(params.userId);
 
     return (
-        <Paper sx={componentStyles.container}>
-            <Box sx={componentStyles.header}>
-                <Avatar sx={{ width: 64, height: 64 }}>
-                    {user.firstName[0]}{user.lastName[0]}
-                </Avatar>
-                <Box>
-                    <Typography variant='h5'>{fullName}</Typography>
-                    <Typography color='text.secondary'>{user.email}</Typography>
-                </Box>
-            </Box>
+        <div className="container mx-auto p-6 space-y-6">
+            <h1 className="text-3xl font-bold">User Profile</h1>
 
-            <Box sx={componentStyles.content}>
-                <Typography>Username: {user.username}</Typography>
-                <Typography>Roles: {user.roles.join(', ')}</Typography>
-            </Box>
+            {/* User profile - no suspense needed, already awaited */}
+            <UserProfile user={user} />
 
-            <Box sx={componentStyles.actions}>
-                {!isEditing ? (
-                    <Button variant='contained' onClick={handleEdit}>
-                        Edit Profile
-                    </Button>
-                ) : (
-                    <>
-                        <Button
-                            variant='contained'
-                            onClick={handleSave}
-                            disabled={updateMutation.isPending}
-                        >
-                            {updateMutation.isPending ? 'Saving...' : 'Save'}
-                        </Button>
-                        <Button onClick={handleCancel}>
-                            Cancel
-                        </Button>
-                    </>
-                )}
-            </Box>
-        </Paper>
+            {/* Activity feed - stream separately */}
+            <Suspense fallback={<ActivitySkeleton />}>
+                <ActivityFeed userId={params.userId} />
+            </Suspense>
+        </div>
     );
-};
+}
 
-export default UserProfile;
-```
+async function ActivityFeed({ userId }: { userId: string }) {
+    const activity = await getUserActivity(userId);
+    return <UserActivity activity={activity} />;
+}
 
-**Usage:**
-```typescript
-<SuspenseLoader>
-    <UserProfile userId='123' onUpdate={() => console.log('Updated')} />
-</SuspenseLoader>
+function ActivitySkeleton() {
+    return (
+        <div className="space-y-2">
+            <Skeleton className="h-12 w-full" />
+            <Skeleton className="h-12 w-full" />
+            <Skeleton className="h-12 w-full" />
+        </div>
+    );
+}
 ```
 
 ---
 
 ## Example 2: Complete Feature Structure
 
-Real example based on `features/posts/`:
+Real example based on Orders feature:
 
 ```
 features/
-  users/
-    api/
-      userApi.ts                # API service layer
+  orders/
     components/
-      UserProfile.tsx           # Main component (from Example 1)
-      UserList.tsx              # List component
-      UserBlog.tsx              # Blog component
-      modals/
-        DeleteUserModal.tsx     # Modal component
+      order-detail.tsx          # Server Component
+      order-list.tsx            # Client Component (interactive)
+      order-form-dialog.tsx     # Client Component (form)
+      order-status-badge.tsx    # ShadCN Badge wrapper
     hooks/
-      useSuspenseUser.ts        # Suspense query hook
-      useUserMutations.ts       # Mutation hooks
-      useUserPermissions.ts     # Feature-specific hook
-    helpers/
-      userHelpers.ts            # Utility functions
-      validation.ts             # Validation logic
+      use-search-orders.ts      # Client-side search hook
     types/
       index.ts                  # TypeScript interfaces
     index.ts                    # Public API exports
+
+actions/
+  order-actions.ts              # Server Actions for mutations
+
+app/
+  orders/
+    page.tsx                    # Route - fetches data
+    [orderId]/
+      page.tsx                  # Detail route
 ```
 
-### API Service (userApi.ts)
+### Server Component (order-detail.tsx)
 
 ```typescript
-import apiClient from '@/lib/apiClient';
-import type { User, CreateUserPayload, UpdateUserPayload } from '../types';
+// features/orders/components/order-detail.tsx
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { OrderStatusBadge } from './order-status-badge';
+import type { Order } from '../types';
 
-export const userApi = {
-    getUser: async (userId: string): Promise<User> => {
-        const { data } = await apiClient.get(`/users/${userId}`);
-        return data;
-    },
-
-    getUsers: async (): Promise<User[]> => {
-        const { data } = await apiClient.get('/users');
-        return data;
-    },
-
-    createUser: async (payload: CreateUserPayload): Promise<User> => {
-        const { data } = await apiClient.post('/users', payload);
-        return data;
-    },
-
-    updateUser: async (userId: string, payload: UpdateUserPayload): Promise<User> => {
-        const { data } = await apiClient.put(`/users/${userId}`, payload);
-        return data;
-    },
-
-    deleteUser: async (userId: string): Promise<void> => {
-        await apiClient.delete(`/users/${userId}`);
-    },
-};
-```
-
-### Suspense Hook (useSuspenseUser.ts)
-
-```typescript
-import { useSuspenseQuery } from '@tanstack/react-query';
-import { userApi } from '../api/userApi';
-import type { User } from '../types';
-
-export function useSuspenseUser(userId: string) {
-    return useSuspenseQuery<User, Error>({
-        queryKey: ['user', userId],
-        queryFn: () => userApi.getUser(userId),
-        staleTime: 5 * 60 * 1000,
-        gcTime: 10 * 60 * 1000,
-    });
+interface OrderDetailProps {
+    order: Order;
 }
 
-export function useSuspenseUsers() {
-    return useSuspenseQuery<User[], Error>({
-        queryKey: ['users'],
-        queryFn: () => userApi.getUsers(),
-        staleTime: 1 * 60 * 1000,  // Shorter for list
-    });
+export function OrderDetail({ order }: OrderDetailProps) {
+    return (
+        <Card>
+            <CardHeader>
+                <CardTitle className="flex items-center justify-between">
+                    <span>Order #{order.orderNumber}</span>
+                    <OrderStatusBadge status={order.status} />
+                </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+                <div>
+                    <p className="text-sm text-muted-foreground">Customer</p>
+                    <p className="font-medium">{order.customerName}</p>
+                </div>
+                <div>
+                    <p className="text-sm text-muted-foreground">Email</p>
+                    <p>{order.customerEmail}</p>
+                </div>
+                <div>
+                    <p className="text-sm text-muted-foreground">Total</p>
+                    <p className="text-lg font-semibold">
+                        ${order.total.toFixed(2)}
+                    </p>
+                </div>
+                <div>
+                    <p className="text-sm text-muted-foreground">Created</p>
+                    <p>{new Date(order.createdAt).toLocaleDateString()}</p>
+                </div>
+            </CardContent>
+        </Card>
+    );
+}
+```
+
+### ShadCN Wrapper (order-status-badge.tsx)
+
+```typescript
+// features/orders/components/order-status-badge.tsx
+import { Badge } from '@/components/ui/badge';
+import type { OrderStatus } from '../types';
+
+interface OrderStatusBadgeProps {
+    status: OrderStatus;
+}
+
+const statusConfig = {
+    pending: { label: 'Pending', variant: 'secondary' as const },
+    processing: { label: 'Processing', variant: 'default' as const },
+    completed: { label: 'Completed', variant: 'success' as const },
+    cancelled: { label: 'Cancelled', variant: 'destructive' as const },
+};
+
+export function OrderStatusBadge({ status }: OrderStatusBadgeProps) {
+    const config = statusConfig[status];
+    return <Badge variant={config.variant}>{config.label}</Badge>;
+}
+```
+
+### Client Component with Search Hook (order-list.tsx)
+
+```typescript
+// features/orders/components/order-list.tsx
+'use client';
+
+import { Input } from '@/components/ui/input';
+import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+} from '@/components/ui/select';
+import { Card, CardContent } from '@/components/ui/card';
+import { useSearchOrders } from '../hooks/use-search-orders';
+import { OrderStatusBadge } from './order-status-badge';
+import type { Order } from '../types';
+
+interface OrderListProps {
+    orders: Order[];
+}
+
+export function OrderList({ orders }: OrderListProps) {
+    const {
+        searchTerm,
+        setSearchTerm,
+        statusFilter,
+        setStatusFilter,
+        filteredOrders,
+    } = useSearchOrders(orders);
+
+    return (
+        <div className="space-y-4">
+            <div className="flex gap-4">
+                <Input
+                    placeholder="Search orders..."
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    className="max-w-sm"
+                />
+                <Select value={statusFilter} onValueChange={setStatusFilter}>
+                    <SelectTrigger className="w-[180px]">
+                        <SelectValue placeholder="Filter by status" />
+                    </SelectTrigger>
+                    <SelectContent>
+                        <SelectItem value="all">All</SelectItem>
+                        <SelectItem value="pending">Pending</SelectItem>
+                        <SelectItem value="processing">Processing</SelectItem>
+                        <SelectItem value="completed">Completed</SelectItem>
+                        <SelectItem value="cancelled">Cancelled</SelectItem>
+                    </SelectContent>
+                </Select>
+            </div>
+
+            <div className="space-y-2">
+                {filteredOrders.map((order) => (
+                    <Card key={order.id}>
+                        <CardContent className="flex items-center justify-between p-4">
+                            <div>
+                                <p className="font-semibold">{order.customerName}</p>
+                                <p className="text-sm text-muted-foreground">
+                                    Order #{order.orderNumber}
+                                </p>
+                            </div>
+                            <div className="flex items-center gap-4">
+                                <p className="font-medium">
+                                    ${order.total.toFixed(2)}
+                                </p>
+                                <OrderStatusBadge status={order.status} />
+                            </div>
+                        </CardContent>
+                    </Card>
+                ))}
+            </div>
+        </div>
+    );
+}
+```
+
+### Search Hook (use-search-orders.ts)
+
+```typescript
+// features/orders/hooks/use-search-orders.ts
+'use client';
+
+import { useState, useMemo } from 'react';
+import { useDebounce } from '@/hooks/use-debounce';
+import type { Order, OrderStatus } from '../types';
+
+export function useSearchOrders(orders: Order[]) {
+    const [searchTerm, setSearchTerm] = useState('');
+    const [statusFilter, setStatusFilter] = useState<string>('all');
+
+    const debouncedSearch = useDebounce(searchTerm, 300);
+
+    const filteredOrders = useMemo(() => {
+        let filtered = orders;
+
+        // Apply search filter
+        if (debouncedSearch) {
+            const search = debouncedSearch.toLowerCase();
+            filtered = filtered.filter(
+                (order) =>
+                    order.customerName.toLowerCase().includes(search) ||
+                    order.orderNumber.toLowerCase().includes(search) ||
+                    order.customerEmail.toLowerCase().includes(search)
+            );
+        }
+
+        // Apply status filter
+        if (statusFilter !== 'all') {
+            filtered = filtered.filter((order) => order.status === statusFilter);
+        }
+
+        return filtered;
+    }, [orders, debouncedSearch, statusFilter]);
+
+    return {
+        searchTerm,
+        setSearchTerm,
+        statusFilter,
+        setStatusFilter,
+        filteredOrders,
+    };
 }
 ```
 
 ### Types (types/index.ts)
 
 ```typescript
-export interface User {
+// features/orders/types/index.ts
+export type OrderStatus = 'pending' | 'processing' | 'completed' | 'cancelled';
+
+export interface Order {
     id: string;
-    username: string;
-    email: string;
-    firstName: string;
-    lastName: string;
-    roles: string[];
+    orderNumber: string;
+    customerName: string;
+    customerEmail: string;
+    status: OrderStatus;
+    total: number;
     createdAt: string;
     updatedAt: string;
 }
 
-export interface CreateUserPayload {
-    username: string;
-    email: string;
-    firstName: string;
-    lastName: string;
-    password: string;
+export interface CreateOrderInput {
+    customerName: string;
+    customerEmail: string;
+    items: OrderItem[];
 }
 
-export type UpdateUserPayload = Partial<Omit<User, 'id' | 'createdAt' | 'updatedAt'>>;
+export interface OrderItem {
+    productId: string;
+    quantity: number;
+    price: number;
+}
 ```
 
 ### Public Exports (index.ts)
 
 ```typescript
-// Export components
-export { UserProfile } from './components/UserProfile';
-export { UserList } from './components/UserList';
+// features/orders/index.ts
+export { OrderDetail } from './components/order-detail';
+export { OrderList } from './components/order-list';
+export { OrderStatusBadge } from './components/order-status-badge';
 
-// Export hooks
-export { useSuspenseUser, useSuspenseUsers } from './hooks/useSuspenseUser';
-export { useUserMutations } from './hooks/useUserMutations';
+export { useSearchOrders } from './hooks/use-search-orders';
 
-// Export API
-export { userApi } from './api/userApi';
-
-// Export types
-export type { User, CreateUserPayload, UpdateUserPayload } from './types';
+export type { Order, OrderStatus, CreateOrderInput } from './types';
 ```
 
 ---
 
-## Example 3: Complete Route with Lazy Loading
+## Example 3: Complete Route with Data Fetching
 
 ```typescript
-/**
- * User profile route
- * Path: /users/:userId
- */
+// app/orders/page.tsx
+import { Suspense } from 'react';
+import { OrderList } from '@/features/orders/components/order-list';
+import { CreateOrderDialog } from '@/features/orders/components/create-order-dialog';
+import { Skeleton } from '@/components/ui/skeleton';
 
-import { createFileRoute } from '@tanstack/react-router';
-import { lazy } from 'react';
-import { SuspenseLoader } from '~components/SuspenseLoader';
+interface PageProps {
+    searchParams: { status?: string };
+}
 
-// Lazy load the UserProfile component
-const UserProfile = lazy(() =>
-    import('@/features/users/components/UserProfile').then(
-        (module) => ({ default: module.UserProfile })
-    )
-);
+async function getOrders(status?: string) {
+    const url = new URL(`${process.env.API_URL}/orders`);
+    if (status && status !== 'all') {
+        url.searchParams.set('status', status);
+    }
 
-export const Route = createFileRoute('/users/$userId')({
-    component: UserProfilePage,
-    loader: ({ params }) => ({
-        crumb: `User ${params.userId}`,
-    }),
-});
+    const res = await fetch(url.toString(), {
+        next: { revalidate: 60 },
+    });
 
-function UserProfilePage() {
-    const { userId } = Route.useParams();
+    if (!res.ok) {
+        throw new Error('Failed to fetch orders');
+    }
 
+    return res.json();
+}
+
+export default async function OrdersPage({ searchParams }: PageProps) {
     return (
-        <SuspenseLoader>
-            <UserProfile
-                userId={userId}
-                onUpdate={() => console.log('Profile updated')}
-            />
-        </SuspenseLoader>
+        <div className="container mx-auto p-6 space-y-6">
+            <div className="flex items-center justify-between">
+                <h1 className="text-3xl font-bold">Orders</h1>
+                <CreateOrderDialog />
+            </div>
+
+            <Suspense fallback={<OrdersListSkeleton />}>
+                <OrdersListAsync status={searchParams.status} />
+            </Suspense>
+        </div>
     );
 }
 
-export default UserProfilePage;
-```
+async function OrdersListAsync({ status }: { status?: string }) {
+    const orders = await getOrders(status);
+    return <OrderList orders={orders} />;
+}
 
----
-
-## Example 4: List with Search and Filtering
-
-```typescript
-import React, { useState, useMemo } from 'react';
-import { Box, TextField, List, ListItem } from '@mui/material';
-import { useDebounce } from 'use-debounce';
-import { useSuspenseQuery } from '@tanstack/react-query';
-import { userApi } from '../api/userApi';
-
-export const UserList: React.FC = () => {
-    const [searchTerm, setSearchTerm] = useState('');
-    const [debouncedSearch] = useDebounce(searchTerm, 300);
-
-    const { data: users } = useSuspenseQuery({
-        queryKey: ['users'],
-        queryFn: () => userApi.getUsers(),
-    });
-
-    // Memoized filtering
-    const filteredUsers = useMemo(() => {
-        if (!debouncedSearch) return users;
-
-        return users.filter(user =>
-            user.name.toLowerCase().includes(debouncedSearch.toLowerCase()) ||
-            user.email.toLowerCase().includes(debouncedSearch.toLowerCase())
-        );
-    }, [users, debouncedSearch]);
-
+function OrdersListSkeleton() {
     return (
-        <Box>
-            <TextField
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                placeholder='Search users...'
-                fullWidth
-                sx={{ mb: 2 }}
-            />
-
-            <List>
-                {filteredUsers.map(user => (
-                    <ListItem key={user.id}>
-                        {user.name} - {user.email}
-                    </ListItem>
-                ))}
-            </List>
-        </Box>
+        <div className="space-y-2">
+            <Skeleton className="h-20 w-full" />
+            <Skeleton className="h-20 w-full" />
+            <Skeleton className="h-20 w-full" />
+        </div>
     );
-};
+}
 ```
 
 ---
 
-## Example 5: Blog with Validation
+## Example 4: Complete Form with Server Action
 
 ```typescript
-import React from 'react';
-import { Box, TextField, Button, Paper } from '@mui/material';
-import { useBlog } from 'react-hook-blog';
-import { zodResolver } from '@hookblog/resolvers/zod';
+// actions/order-actions.ts
+'use server';
+
 import { z } from 'zod';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { userApi } from '../api/userApi';
-import { useMuiSnackbar } from '@/hooks/useMuiSnackbar';
+import { revalidatePath } from 'next/cache';
+import { auth } from '@/lib/auth';
 
-const userSchema = z.object({
-    username: z.string().min(3).max(50),
-    email: z.string().email(),
-    firstName: z.string().min(1),
-    lastName: z.string().min(1),
+const createOrderSchema = z.object({
+    customerName: z.string().min(1, 'Customer name is required'),
+    customerEmail: z.string().email('Invalid email address'),
+    total: z.number().min(0.01, 'Total must be greater than 0'),
 });
 
-type UserBlogData = z.infer<typeof userSchema>;
+export async function createOrder(formData: FormData) {
+    // Check authentication
+    const session = await auth();
+    if (!session) {
+        return {
+            success: false,
+            errors: { _form: ['You must be logged in to create orders'] },
+        };
+    }
 
-interface CreateUserBlogProps {
-    onSuccess?: () => void;
-}
-
-export const CreateUserBlog: React.FC<CreateUserBlogProps> = ({ onSuccess }) => {
-    const queryClient = useQueryClient();
-    const { showSuccess, showError } = useMuiSnackbar();
-
-    const { register, handleSubmit, blogState: { errors }, reset } = useBlog<UserBlogData>({
-        resolver: zodResolver(userSchema),
-        defaultValues: {
-            username: '',
-            email: '',
-            firstName: '',
-            lastName: '',
-        },
+    // Validate input
+    const parsed = createOrderSchema.safeParse({
+        customerName: formData.get('customerName'),
+        customerEmail: formData.get('customerEmail'),
+        total: Number(formData.get('total')),
     });
 
-    const createMutation = useMutation({
-        mutationFn: (data: UserBlogData) => userApi.createUser(data),
+    if (!parsed.success) {
+        return {
+            success: false,
+            errors: parsed.error.flatten().fieldErrors,
+        };
+    }
 
-        onSuccess: () => {
-            queryClient.invalidateQueries({ queryKey: ['users'] });
-            showSuccess('User created successfully');
-            reset();
-            onSuccess?.();
-        },
+    try {
+        const response = await fetch(`${process.env.API_URL}/orders`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(parsed.data),
+        });
 
-        onError: () => {
-            showError('Failed to create user');
-        },
-    });
+        if (!response.ok) {
+            throw new Error('Failed to create order');
+        }
 
-    const onSubmit = (data: UserBlogData) => {
-        createMutation.mutate(data);
-    };
+        const order = await response.json();
 
-    return (
-        <Paper sx={{ p: 3, maxWidth: 500 }}>
-            <blog onSubmit={handleSubmit(onSubmit)}>
-                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                    <TextField
-                        {...register('username')}
-                        label='Username'
-                        error={!!errors.username}
-                        helperText={errors.username?.message}
-                        fullWidth
-                    />
+        revalidatePath('/orders');
+        revalidatePath('/');
 
-                    <TextField
-                        {...register('email')}
-                        label='Email'
-                        type='email'
-                        error={!!errors.email}
-                        helperText={errors.email?.message}
-                        fullWidth
-                    />
-
-                    <TextField
-                        {...register('firstName')}
-                        label='First Name'
-                        error={!!errors.firstName}
-                        helperText={errors.firstName?.message}
-                        fullWidth
-                    />
-
-                    <TextField
-                        {...register('lastName')}
-                        label='Last Name'
-                        error={!!errors.lastName}
-                        helperText={errors.lastName?.message}
-                        fullWidth
-                    />
-
-                    <Button
-                        type='submit'
-                        variant='contained'
-                        disabled={createMutation.isPending}
-                    >
-                        {createMutation.isPending ? 'Creating...' : 'Create User'}
-                    </Button>
-                </Box>
-            </blog>
-        </Paper>
-    );
-};
-
-export default CreateUserBlog;
-```
-
----
-
-## Example 2: Parent Container with Lazy Loading
-
-```typescript
-import React from 'react';
-import { Box } from '@mui/material';
-import { SuspenseLoader } from '~components/SuspenseLoader';
-
-// Lazy load heavy components
-const UserList = React.lazy(() => import('./UserList'));
-const UserStats = React.lazy(() => import('./UserStats'));
-const ActivityFeed = React.lazy(() => import('./ActivityFeed'));
-
-export const UserDashboard: React.FC = () => {
-    return (
-        <Box sx={{ p: 2 }}>
-            <SuspenseLoader>
-                <UserStats />
-            </SuspenseLoader>
-
-            <Box sx={{ display: 'flex', gap: 2, mt: 2 }}>
-                <Box sx={{ flex: 2 }}>
-                    <SuspenseLoader>
-                        <UserList />
-                    </SuspenseLoader>
-                </Box>
-
-                <Box sx={{ flex: 1 }}>
-                    <SuspenseLoader>
-                        <ActivityFeed />
-                    </SuspenseLoader>
-                </Box>
-            </Box>
-        </Box>
-    );
-};
-
-export default UserDashboard;
-```
-
-**Benefits:**
-- Each section loads independently
-- User sees partial content sooner
-- Better perceived perblogance
-
----
-
-## Example 3: Cache-First Strategy Implementation
-
-Complete example based on useSuspensePost.ts:
-
-```typescript
-import { useSuspenseQuery, useQueryClient } from '@tanstack/react-query';
-import { postApi } from '../api/postApi';
-import type { Post } from '../types';
-
-/**
- * Smart post hook with cache-first strategy
- * Reuses data from grid cache when available
- */
-export function useSuspensePost(blogId: number, postId: number) {
-    const queryClient = useQueryClient();
-
-    return useSuspenseQuery<Post, Error>({
-        queryKey: ['post', blogId, postId],
-        queryFn: async () => {
-            // Strategy 1: Check grid cache first (avoids API call)
-            const gridCache = queryClient.getQueryData<{ rows: Post[] }>([
-                'posts-v2',
-                blogId,
-                'summary'
-            ]) || queryClient.getQueryData<{ rows: Post[] }>([
-                'posts-v2',
-                blogId,
-                'flat'
-            ]);
-
-            if (gridCache?.rows) {
-                const cached = gridCache.rows.find(
-                    (row) => row.S_ID === postId
-                );
-
-                if (cached) {
-                    return cached;  // Return from cache - no API call!
-                }
-            }
-
-            // Strategy 2: Not in cache, fetch from API
-            return postApi.getPost(blogId, postId);
-        },
-        staleTime: 5 * 60 * 1000,       // Fresh for 5 minutes
-        gcTime: 10 * 60 * 1000,          // Cache for 10 minutes
-        refetchOnWindowFocus: false,     // Don't refetch on focus
-    });
+        return { success: true, data: order };
+    } catch (error) {
+        return {
+            success: false,
+            errors: { _form: ['Failed to create order. Please try again.'] },
+        };
+    }
 }
 ```
 
-**Why this pattern:**
-- Checks grid cache before API
-- Instant data if user came from grid
-- Falls back to API if not cached
-- Configurable cache times
-
----
-
-## Example 4: Complete Route File
-
 ```typescript
-/**
- * Project catalog route
- * Path: /project-catalog
- */
+// features/orders/components/create-order-dialog.tsx
+'use client';
 
-import { createFileRoute } from '@tanstack/react-router';
-import { lazy } from 'react';
-
-// Lazy load the PostTable component
-const PostTable = lazy(() =>
-    import('@/features/posts/components/PostTable').then(
-        (module) => ({ default: module.PostTable })
-    )
-);
-
-// Route constants
-const PROJECT_CATALOG_FORM_ID = 744;
-const PROJECT_CATALOG_PROJECT_ID = 225;
-
-export const Route = createFileRoute('/project-catalog/')({
-    component: ProjectCatalogPage,
-    loader: () => ({
-        crumb: 'Projects',  // Breadcrumb title
-    }),
-});
-
-function ProjectCatalogPage() {
-    return (
-        <PostTable
-            blogId={PROJECT_CATALOG_FORM_ID}
-            projectId={PROJECT_CATALOG_PROJECT_ID}
-            tableType='active_projects'
-            title='Blog Dashboard'
-        />
-    );
-}
-
-export default ProjectCatalogPage;
-```
-
----
-
-## Example 5: Dialog with Blog
-
-```typescript
-import React from 'react';
+import { useState, useTransition } from 'react';
 import {
     Dialog,
-    DialogTitle,
     DialogContent,
-    DialogActions,
-    Button,
-    TextField,
-    Box,
-    IconButton,
-} from '@mui/material';
-import { Close, PersonAdd } from '@mui/icons-material';
-import { useBlog } from 'react-hook-blog';
-import { zodResolver } from '@hookblog/resolvers/zod';
-import { z } from 'zod';
+    DialogHeader,
+    DialogTitle,
+    DialogTrigger,
+} from '@/components/ui/dialog';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Plus } from 'lucide-react';
+import { toast } from 'sonner';
+import { createOrder } from '@/actions/order-actions';
 
-const blogSchema = z.object({
-    name: z.string().min(1),
-    email: z.string().email(),
-});
+export function CreateOrderDialog() {
+    const [open, setOpen] = useState(false);
+    const [isPending, startTransition] = useTransition();
+    const [errors, setErrors] = useState<Record<string, string[]>>({});
 
-type BlogData = z.infer<typeof blogSchema>;
+    async function handleSubmit(formData: FormData) {
+        startTransition(async () => {
+            const result = await createOrder(formData);
 
-interface AddUserDialogProps {
-    open: boolean;
-    onClose: () => void;
-    onSubmit: (data: BlogData) => Promise<void>;
-}
-
-export const AddUserDialog: React.FC<AddUserDialogProps> = ({
-    open,
-    onClose,
-    onSubmit,
-}) => {
-    const { register, handleSubmit, blogState: { errors }, reset } = useBlog<BlogData>({
-        resolver: zodResolver(blogSchema),
-    });
-
-    const handleClose = () => {
-        reset();
-        onClose();
-    };
-
-    const handleBlogSubmit = async (data: BlogData) => {
-        await onSubmit(data);
-        handleClose();
-    };
+            if (result.success) {
+                toast.success('Order created successfully');
+                setOpen(false);
+                setErrors({});
+            } else if (result.errors) {
+                setErrors(result.errors);
+                toast.error('Failed to create order');
+            }
+        });
+    }
 
     return (
-        <Dialog open={open} onClose={handleClose} maxWidth='sm' fullWidth>
-            <DialogTitle>
-                <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                        <PersonAdd color='primary' />
-                        Add User
-                    </Box>
-                    <IconButton onClick={handleClose} size='small'>
-                        <Close />
-                    </IconButton>
-                </Box>
-            </DialogTitle>
-
-            <blog onSubmit={handleSubmit(handleBlogSubmit)}>
-                <DialogContent>
-                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                        <TextField
-                            {...register('name')}
-                            label='Name'
-                            error={!!errors.name}
-                            helperText={errors.name?.message}
-                            fullWidth
-                            autoFocus
+        <Dialog open={open} onOpenChange={setOpen}>
+            <DialogTrigger asChild>
+                <Button>
+                    <Plus className="mr-2 h-4 w-4" />
+                    Create Order
+                </Button>
+            </DialogTrigger>
+            <DialogContent>
+                <DialogHeader>
+                    <DialogTitle>Create New Order</DialogTitle>
+                </DialogHeader>
+                <form action={handleSubmit} className="space-y-4">
+                    <div>
+                        <Label htmlFor="customerName">Customer Name</Label>
+                        <Input
+                            id="customerName"
+                            name="customerName"
+                            placeholder="John Doe"
                         />
+                        {errors.customerName && (
+                            <p className="text-sm text-red-500 mt-1">
+                                {errors.customerName[0]}
+                            </p>
+                        )}
+                    </div>
 
-                        <TextField
-                            {...register('email')}
-                            label='Email'
-                            type='email'
-                            error={!!errors.email}
-                            helperText={errors.email?.message}
-                            fullWidth
+                    <div>
+                        <Label htmlFor="customerEmail">Email</Label>
+                        <Input
+                            id="customerEmail"
+                            name="customerEmail"
+                            type="email"
+                            placeholder="john@example.com"
                         />
-                    </Box>
-                </DialogContent>
+                        {errors.customerEmail && (
+                            <p className="text-sm text-red-500 mt-1">
+                                {errors.customerEmail[0]}
+                            </p>
+                        )}
+                    </div>
 
-                <DialogActions>
-                    <Button onClick={handleClose}>Cancel</Button>
-                    <Button type='submit' variant='contained'>
-                        Add User
-                    </Button>
-                </DialogActions>
-            </blog>
+                    <div>
+                        <Label htmlFor="total">Total Amount</Label>
+                        <Input
+                            id="total"
+                            name="total"
+                            type="number"
+                            step="0.01"
+                            placeholder="99.99"
+                        />
+                        {errors.total && (
+                            <p className="text-sm text-red-500 mt-1">
+                                {errors.total[0]}
+                            </p>
+                        )}
+                    </div>
+
+                    {errors._form && (
+                        <p className="text-sm text-red-500">{errors._form[0]}</p>
+                    )}
+
+                    <div className="flex justify-end gap-2">
+                        <Button
+                            type="button"
+                            variant="outline"
+                            onClick={() => setOpen(false)}
+                        >
+                            Cancel
+                        </Button>
+                        <Button type="submit" disabled={isPending}>
+                            {isPending ? 'Creating...' : 'Create Order'}
+                        </Button>
+                    </div>
+                </form>
+            </DialogContent>
         </Dialog>
     );
-};
+}
 ```
 
 ---
 
-## Example 6: Parallel Data Fetching
+## Example 5: Parallel Data Fetching
 
 ```typescript
-import React from 'react';
-import { Box, Grid, Paper } from '@mui/material';
-import { useSuspenseQueries } from '@tanstack/react-query';
-import { userApi } from '../api/userApi';
-import { statsApi } from '../api/statsApi';
-import { activityApi } from '../api/activityApi';
+// app/dashboard/page.tsx
+import { Suspense } from 'react';
+import { StatsCards } from '@/features/dashboard/components/stats-cards';
+import { RecentOrders } from '@/features/dashboard/components/recent-orders';
+import { ActivityFeed } from '@/features/dashboard/components/activity-feed';
+import { Skeleton } from '@/components/ui/skeleton';
 
-export const Dashboard: React.FC = () => {
-    // Fetch all data in parallel with Suspense
-    const [statsQuery, usersQuery, activityQuery] = useSuspenseQueries({
-        queries: [
-            {
-                queryKey: ['stats'],
-                queryFn: () => statsApi.getStats(),
-            },
-            {
-                queryKey: ['users', 'active'],
-                queryFn: () => userApi.getActiveUsers(),
-            },
-            {
-                queryKey: ['activity', 'recent'],
-                queryFn: () => activityApi.getRecent(),
-            },
-        ],
+async function getStats() {
+    const res = await fetch(`${process.env.API_URL}/stats`, {
+        next: { revalidate: 300 },
     });
+    if (!res.ok) throw new Error('Failed to fetch stats');
+    return res.json();
+}
+
+async function getRecentOrders() {
+    const res = await fetch(`${process.env.API_URL}/orders?limit=5`, {
+        next: { revalidate: 60 },
+    });
+    if (!res.ok) throw new Error('Failed to fetch orders');
+    return res.json();
+}
+
+async function getActivity() {
+    const res = await fetch(`${process.env.API_URL}/activity`, {
+        next: { revalidate: 30 },
+    });
+    if (!res.ok) throw new Error('Failed to fetch activity');
+    return res.json();
+}
+
+export default async function DashboardPage() {
+    // Fetch stats first (critical data)
+    const stats = await getStats();
 
     return (
-        <Box sx={{ p: 2 }}>
-            <Grid container spacing={2}>
-                <Grid size={{ xs: 12, md: 4 }}>
-                    <Paper sx={{ p: 2 }}>
-                        <h3>Stats</h3>
-                        <p>Total: {statsQuery.data.total}</p>
-                    </Paper>
-                </Grid>
+        <div className="container mx-auto p-6 space-y-6">
+            <h1 className="text-3xl font-bold">Dashboard</h1>
 
-                <Grid size={{ xs: 12, md: 4 }}>
-                    <Paper sx={{ p: 2 }}>
-                        <h3>Active Users</h3>
-                        <p>Count: {usersQuery.data.length}</p>
-                    </Paper>
-                </Grid>
+            {/* Stats - already awaited */}
+            <StatsCards stats={stats} />
 
-                <Grid size={{ xs: 12, md: 4 }}>
-                    <Paper sx={{ p: 2 }}>
-                        <h3>Recent Activity</h3>
-                        <p>Events: {activityQuery.data.length}</p>
-                    </Paper>
-                </Grid>
-            </Grid>
-        </Box>
+            {/* Orders and Activity - stream in parallel */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <Suspense fallback={<CardSkeleton />}>
+                    <RecentOrdersAsync />
+                </Suspense>
+
+                <Suspense fallback={<CardSkeleton />}>
+                    <ActivityFeedAsync />
+                </Suspense>
+            </div>
+        </div>
     );
-};
+}
 
-// Usage with Suspense
-<SuspenseLoader>
-    <Dashboard />
-</SuspenseLoader>
+async function RecentOrdersAsync() {
+    const orders = await getRecentOrders();
+    return <RecentOrders orders={orders} />;
+}
+
+async function ActivityFeedAsync() {
+    const activity = await getActivity();
+    return <ActivityFeed activity={activity} />;
+}
+
+function CardSkeleton() {
+    return (
+        <div className="border rounded-lg p-6">
+            <Skeleton className="h-8 w-32 mb-4" />
+            <div className="space-y-2">
+                <Skeleton className="h-12 w-full" />
+                <Skeleton className="h-12 w-full" />
+                <Skeleton className="h-12 w-full" />
+            </div>
+        </div>
+    );
+}
 ```
 
 ---
 
-## Example 7: Optimistic Update
+## Example 6: Update with Optimistic UI
 
 ```typescript
-import { useMutation, useQueryClient } from '@tanstack/react-query';
-import type { User } from '../types';
+// features/orders/components/update-order-status.tsx
+'use client';
 
-export const useToggleUserStatus = () => {
-    const queryClient = useQueryClient();
+import { useTransition } from 'react';
+import { useRouter } from 'next/navigation';
+import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+} from '@/components/ui/select';
+import { toast } from 'sonner';
+import { updateOrderStatus } from '@/actions/order-actions';
+import type { OrderStatus } from '../types';
 
-    return useMutation({
-        mutationFn: (userId: string) => userApi.toggleStatus(userId),
+interface UpdateOrderStatusProps {
+    orderId: string;
+    currentStatus: OrderStatus;
+}
 
-        // Optimistic update
-        onMutate: async (userId) => {
-            // Cancel outgoing refetches
-            await queryClient.cancelQueries({ queryKey: ['users'] });
+export function UpdateOrderStatus({ orderId, currentStatus }: UpdateOrderStatusProps) {
+    const router = useRouter();
+    const [isPending, startTransition] = useTransition();
 
-            // Snapshot previous value
-            const previousUsers = queryClient.getQueryData<User[]>(['users']);
+    async function handleStatusChange(newStatus: OrderStatus) {
+        startTransition(async () => {
+            const formData = new FormData();
+            formData.set('status', newStatus);
 
-            // Optimistically update UI
-            queryClient.setQueryData<User[]>(['users'], (old) => {
-                return old?.map(user =>
-                    user.id === userId
-                        ? { ...user, active: !user.active }
-                        : user
-                ) || [];
-            });
+            const result = await updateOrderStatus(orderId, formData);
 
-            return { previousUsers };
-        },
+            if (result.success) {
+                toast.success('Order status updated');
+                router.refresh(); // Refresh Server Component data
+            } else {
+                toast.error(result.errors?._form?.[0] || 'Failed to update status');
+            }
+        });
+    }
 
-        // Rollback on error
-        onError: (err, userId, context) => {
-            queryClient.setQueryData(['users'], context?.previousUsers);
-        },
-
-        // Refetch after mutation
-        onSettled: () => {
-            queryClient.invalidateQueries({ queryKey: ['users'] });
-        },
-    });
-};
+    return (
+        <Select
+            value={currentStatus}
+            onValueChange={handleStatusChange}
+            disabled={isPending}
+        >
+            <SelectTrigger className="w-[180px]">
+                <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+                <SelectItem value="pending">Pending</SelectItem>
+                <SelectItem value="processing">Processing</SelectItem>
+                <SelectItem value="completed">Completed</SelectItem>
+                <SelectItem value="cancelled">Cancelled</SelectItem>
+            </SelectContent>
+        </Select>
+    );
+}
 ```
 
 ---
@@ -860,13 +761,26 @@ export const useToggleUserStatus = () => {
 
 **Key Takeaways:**
 
-1. **Component Pattern**: React.FC + lazy + Suspense + useSuspenseQuery
-2. **Feature Structure**: Organized subdirectories (api/, components/, hooks/, etc.)
-3. **Routing**: Folder-based with lazy loading
-4. **Data Fetching**: useSuspenseQuery with cache-first strategy
-5. **Blogs**: React Hook Blog + Zod validation
-6. **Error Handling**: useMuiSnackbar + onError callbacks
-7. **Perblogance**: useMemo, useCallback, React.memo, debouncing
-8. **Styling**: Inline <100 lines, sx prop, MUI v7 syntax
+1. **Server Components**: async/await for data fetching in page.tsx
+2. **Client Components**: 'use client' for interactivity (forms, search)
+3. **Server Actions**: actions/*.ts for all mutations with Zod validation
+4. **Streaming**: Suspense boundaries for progressive loading
+5. **ShadCN Wrappers**: Domain-specific badge/button components
+6. **Search/Filter**: Client-side hooks with useMemo + debouncing
+7. **Forms**: FormData + Server Actions + useTransition
+8. **Error Handling**: try/catch in Server Actions, return error objects
+9. **Revalidation**: revalidatePath/revalidateTag + router.refresh()
+10. **Toast Notifications**: Sonner for user feedback
+
+**Architecture Flow:**
+```
+page.tsx (Server Component)
+  ├─ Fetch data with async/await
+  ├─ Pass data to Client Components as props
+  └─ Client Components
+      ├─ Handle user interaction
+      ├─ Call Server Actions for mutations
+      └─ Use hooks for local state (search, filters)
+```
 
 **See other resources for detailed explanations of each pattern.**

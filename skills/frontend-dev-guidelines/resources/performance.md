@@ -1,406 +1,583 @@
 # Performance Optimization
 
-Patterns for optimizing React component performance, preventing unnecessary re-renders, and avoiding memory leaks.
+Modern performance patterns for Next.js 15 App Router. Learn Server Component caching, static vs dynamic rendering, image optimization, and client component optimization.
 
 ---
 
-## Memoization Patterns
+## Server Component Caching
+
+### Automatic Request Memoization
+
+**Next.js automatically deduplicates requests** in Server Components:
+
+```typescript
+// app/dashboard/page.tsx
+export default async function DashboardPage() {
+    // All three components call getUser() with same ID
+    // Next.js only makes ONE request - others are cached
+    return (
+        <>
+            <UserProfile />   {/* getUser('123') */}
+            <UserStats />     {/* getUser('123') - cached! */}
+            <UserActivity />  {/* getUser('123') - cached! */}
+        </>
+    );
+}
+
+// actions/user.ts
+export async function getUser(id: string) {
+    // Called 3 times but executes once per request
+    return await prisma.user.findUnique({ where: { id } });
+}
+```
+
+**How it works:**
+- Same fetch/function calls in single request tree are automatically memoized
+- No configuration needed
+- Resets per-request (not across requests)
+
+---
+
+## Static vs Dynamic Rendering
+
+### Static Rendering (Default - Fastest)
+
+**Pre-rendered at build time** - HTML cached on CDN:
+
+```typescript
+// app/about/page.tsx
+export default async function AboutPage() {
+    // No dynamic data - rendered once at build
+    return (
+        <div className="container py-8">
+            <h1 className="text-3xl font-bold">About Us</h1>
+            <p>Company information...</p>
+        </div>
+    );
+}
+```
+
+**Benefits:**
+- Instant page loads (served from CDN)
+- No server computation per request
+- Best Core Web Vitals scores
+- Works offline (cached)
+
+**Good for:**
+- Marketing pages
+- Blog posts
+- Documentation
+- Product pages with stable data
+
+### Incremental Static Regeneration (ISR)
+
+**Static with periodic updates:**
+
+```typescript
+// app/products/page.tsx
+export const revalidate = 60; // Revalidate every 60 seconds
+
+export default async function ProductsPage() {
+    const products = await getProducts();
+
+    return <ProductsList products={products} />;
+}
+```
+
+**How it works:**
+1. First request - serves static HTML
+2. After 60 seconds - next request triggers rebuild in background
+3. Subsequent requests get new version
+4. Best of both worlds - fast + fresh data
+
+### Dynamic Rendering
+
+**Rendered per-request** - for user-specific content:
+
+```typescript
+// app/dashboard/page.tsx
+import { cookies } from 'next/headers';
+
+export default async function DashboardPage() {
+    // Using cookies() forces dynamic rendering
+    const userId = cookies().get('userId');
+
+    const stats = await getStats(userId);
+
+    return <DashboardDisplay stats={stats} />;
+}
+```
+
+**Triggers dynamic rendering:**
+- `cookies()`
+- `headers()`
+- `searchParams`
+- `fetch()` with `cache: 'no-store'`
+
+**Force dynamic:**
+```typescript
+export const dynamic = 'force-dynamic';
+```
+
+---
+
+## Image Optimization
+
+### next/image Component
+
+**Automatic optimization** - use `<Image>` instead of `<img>`:
+
+```typescript
+import Image from 'next/image';
+
+export function ProductCard({ product }: { product: Product }) {
+    return (
+        <div className="rounded-lg border bg-card p-4">
+            {/* ✅ CORRECT - Optimized */}
+            <Image
+                src={product.imageUrl}
+                alt={product.name}
+                width={400}
+                height={300}
+                className="rounded-md"
+            />
+
+            {/* ❌ AVOID - Not optimized */}
+            <img src={product.imageUrl} alt={product.name} />
+        </div>
+    );
+}
+```
+
+**Benefits:**
+- Automatic WebP/AVIF conversion
+- Responsive images (srcset)
+- Lazy loading by default
+- Prevents layout shift (with width/height)
+- Size optimization
+
+### Priority Loading (Above Fold)
+
+```typescript
+<Image
+    src="/hero.jpg"
+    alt="Hero"
+    width={1200}
+    height={600}
+    priority  // Load immediately (above the fold)
+/>
+```
+
+### Fill Mode (Unknown Dimensions)
+
+```typescript
+<div className="relative h-96 w-full">
+    <Image
+        src={product.imageUrl}
+        alt={product.name}
+        fill
+        className="object-cover"
+    />
+</div>
+```
+
+---
+
+## Font Optimization
+
+### next/font
+
+**Automatic font optimization** - no layout shift:
+
+```typescript
+// app/layout.tsx
+import { Inter, Roboto_Mono } from 'next/font/google';
+
+const inter = Inter({
+    subsets: ['latin'],
+    display: 'swap',
+});
+
+const robotoMono = Roboto_Mono({
+    subsets: ['latin'],
+    weight: ['400', '700'],
+    display: 'swap',
+});
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+    return (
+        <html lang="en" className={inter.className}>
+            <body>{children}</body>
+        </html>
+    );
+}
+```
+
+**Benefits:**
+- Self-hosted (no external requests)
+- Zero layout shift
+- Preloaded automatically
+- Subset optimization
+
+---
+
+## Code Splitting (Automatic)
+
+### Route-Based Splitting
+
+**Automatic** - Each route is a separate chunk:
+
+```typescript
+// app/orders/page.tsx
+export default function OrdersPage() {
+    // Only loads when user visits /orders
+    return <OrdersList />;
+}
+
+// app/products/page.tsx
+export default function ProductsPage() {
+    // Only loads when user visits /products
+    return <ProductsList />;
+}
+```
+
+**No manual splitting needed** - Next.js does it automatically.
+
+---
+
+## Client Component Optimization
 
 ### useMemo for Expensive Computations
 
 ```typescript
+'use client';
+
 import { useMemo } from 'react';
 
-export const DataDisplay: React.FC<{ items: Item[], searchTerm: string }> = ({
-    items,
-    searchTerm,
-}) => {
-    // ❌ AVOID - Runs on every render
-    const filteredItems = items
-        .filter(item => item.name.includes(searchTerm))
-        .sort((a, b) => a.name.localeCompare(b.name));
+export function OrdersTable({ orders }: { orders: Order[] }) {
+    const [searchTerm, setSearchTerm] = useState('');
+    const [sortBy, setSortBy] = useState('date');
 
-    // ✅ CORRECT - Memoized, only recalculates when dependencies change
-    const filteredItems = useMemo(() => {
-        return items
-            .filter(item => item.name.toLowerCase().includes(searchTerm.toLowerCase()))
-            .sort((a, b) => a.name.localeCompare(b.name));
-    }, [items, searchTerm]);
+    // ✅ CORRECT - Memoized expensive computation
+    const filteredAndSortedOrders = useMemo(() => {
+        return orders
+            .filter(order =>
+                order.customerName.toLowerCase().includes(searchTerm.toLowerCase())
+            )
+            .sort((a, b) => {
+                if (sortBy === 'date') return b.createdAt - a.createdAt;
+                if (sortBy === 'amount') return b.amount - a.amount;
+                return 0;
+            });
+    }, [orders, searchTerm, sortBy]);
 
-    return <List items={filteredItems} />;
-};
+    return (
+        <div>
+            <input
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                placeholder="Search..."
+            />
+            <table>
+                {filteredAndSortedOrders.map(order => (
+                    <OrderRow key={order.id} order={order} />
+                ))}
+            </table>
+        </div>
+    );
+}
 ```
 
 **When to use useMemo:**
 - Filtering/sorting large arrays
 - Complex calculations
 - Transforming data structures
-- Expensive computations (loops, recursion)
 
-**When NOT to use useMemo:**
-- Simple string concatenation
-- Basic arithmetic
-- Premature optimization (profile first!)
+**When NOT to:**
+- Simple operations (string concat)
+- Small arrays (<100 items)
 
----
-
-## useCallback for Event Handlers
-
-### The Problem
+### useCallback for Stable Functions
 
 ```typescript
-// ❌ AVOID - Creates new function on every render
-export const Parent: React.FC = () => {
-    const handleClick = (id: string) => {
-        console.log('Clicked:', id);
-    };
+'use client';
 
-    // Child re-renders every time Parent renders
-    // because handleClick is a new function reference each time
-    return <Child onClick={handleClick} />;
-};
-```
-
-### The Solution
-
-```typescript
 import { useCallback } from 'react';
 
-export const Parent: React.FC = () => {
-    // ✅ CORRECT - Stable function reference
-    const handleClick = useCallback((id: string) => {
-        console.log('Clicked:', id);
-    }, []); // Empty deps = function never changes
+export function OrdersList({ orders }: { orders: Order[] }) {
+    const handleOrderClick = useCallback((orderId: string) => {
+        console.log('Clicked:', orderId);
+        // Navigate or show details
+    }, []);
 
-    // Child only re-renders when props actually change
-    return <Child onClick={handleClick} />;
-};
+    return (
+        <div>
+            {orders.map(order => (
+                <OrderCard
+                    key={order.id}
+                    order={order}
+                    onClick={handleOrderClick}  // Stable reference
+                />
+            ))}
+        </div>
+    );
+}
 ```
 
 **When to use useCallback:**
-- Functions passed as props to children
-- Functions used as dependencies in useEffect
-- Functions passed to memoized components
+- Functions passed to child components
+- Functions in dependency arrays
 - Event handlers in lists
-
-**When NOT to use useCallback:**
-- Event handlers not passed to children
-- Simple inline handlers: `onClick={() => doSomething()}`
 
 ---
 
-## React.memo for Component Memoization
+## Streaming and Suspense
 
-### Basic Usage
+### Progressive Rendering
+
+**Load fast content first, slow content streams in:**
 
 ```typescript
-import React from 'react';
+// app/dashboard/page.tsx
+import { Suspense } from 'react';
+import { Skeleton } from '@/components/ui/skeleton';
 
-interface ExpensiveComponentProps {
-    data: ComplexData;
-    onAction: () => void;
+export default function DashboardPage() {
+    return (
+        <div className="container py-8 space-y-8">
+            {/* Fast - loads immediately */}
+            <h1 className="text-3xl font-bold">Dashboard</h1>
+
+            {/* Fast query - appears first */}
+            <Suspense fallback={<Skeleton className="h-32" />}>
+                <QuickStats />
+            </Suspense>
+
+            {/* Slow query - doesn't block page */}
+            <Suspense fallback={<Skeleton className="h-96" />}>
+                <HeavyAnalytics />
+            </Suspense>
+        </div>
+    );
 }
 
-// ✅ Wrap expensive components in React.memo
-export const ExpensiveComponent = React.memo<ExpensiveComponentProps>(
-    function ExpensiveComponent({ data, onAction }) {
-        // Complex rendering logic
-        return <ComplexVisualization data={data} />;
-    }
-);
+async function QuickStats() {
+    const stats = await getQuickStats(); // 50ms query
+    return <StatsDisplay stats={stats} />;
+}
+
+async function HeavyAnalytics() {
+    const analytics = await getAnalytics(); // 2000ms query - streams separately!
+    return <AnalyticsChart data={analytics} />;
+}
 ```
 
-**When to use React.memo:**
-- Component renders frequently
-- Component has expensive rendering
-- Props don't change often
-- Component is a list item
-- DataGrid cells/renderers
+**Benefits:**
+- User sees content sooner
+- Slow queries don't block page
+- Better perceived performance
 
-**When NOT to use React.memo:**
-- Props change frequently anyway
-- Rendering is already fast
-- Premature optimization
+---
+
+## Parallel Data Fetching
+
+### Promise.all() for Independent Data
+
+```typescript
+// app/orders/[id]/page.tsx
+export default async function OrderDetailPage({ params }: { params: { id: string } }) {
+    // ✅ CORRECT - Fetch in parallel
+    const [order, customer, items] = await Promise.all([
+        getOrder(params.id),      // 100ms
+        getCustomer(params.id),   // 150ms
+        getOrderItems(params.id), // 200ms
+    ]);
+    // Total time: 200ms (slowest query)
+
+    return (
+        <div>
+            <OrderHeader order={order} />
+            <CustomerInfo customer={customer} />
+            <ItemsList items={items} />
+        </div>
+    );
+}
+
+// ❌ AVOID - Sequential (slow)
+// const order = await getOrder(params.id);      // 100ms
+// const customer = await getCustomer(params.id);   // 150ms
+// const items = await getOrderItems(params.id); // 200ms
+// Total time: 450ms (sum of all!)
+```
 
 ---
 
 ## Debounced Search
 
-### Using use-debounce Hook
-
 ```typescript
+'use client';
+
 import { useState } from 'react';
-import { useDebounce } from 'use-debounce';
-import { useSuspenseQuery } from '@tanstack/react-query';
+import { useDebounce } from '@/hooks/use-debounce';
 
-export const SearchComponent: React.FC = () => {
+export function OrdersSearch() {
     const [searchTerm, setSearchTerm] = useState('');
+    const debouncedSearch = useDebounce(searchTerm, 300);
 
-    // Debounce for 300ms
-    const [debouncedSearchTerm] = useDebounce(searchTerm, 300);
-
-    // Query uses debounced value
-    const { data } = useSuspenseQuery({
-        queryKey: ['search', debouncedSearchTerm],
-        queryFn: () => api.search(debouncedSearchTerm),
-        enabled: debouncedSearchTerm.length > 0,
-    });
+    // This only runs 300ms after user stops typing
+    const results = useSearchOrders(debouncedSearch);
 
     return (
         <input
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            placeholder='Search...'
+            placeholder="Search orders..."
         />
     );
-};
+}
 ```
 
-**Optimal Debounce Timing:**
-- **300-500ms**: Search/filtering
-- **1000ms**: Auto-save
-- **100-200ms**: Real-time validation
+**Optimal debounce times:**
+- Search: 300-500ms
+- Auto-save: 1000ms
+- Validation: 100-200ms
 
 ---
 
 ## Memory Leak Prevention
 
-### Cleanup Timeouts/Intervals
+### Cleanup in useEffect
 
 ```typescript
-import { useEffect, useState } from 'react';
+'use client';
 
-export const MyComponent: React.FC = () => {
-    const [count, setCount] = useState(0);
+import { useEffect } from 'react';
 
+export function MyComponent() {
     useEffect(() => {
-        // ✅ CORRECT - Cleanup interval
-        const intervalId = setInterval(() => {
-            setCount(c => c + 1);
+        // Setup
+        const interval = setInterval(() => {
+            console.log('Tick');
         }, 1000);
 
+        // ✅ CLEANUP - Prevent memory leak
         return () => {
-            clearInterval(intervalId);  // Cleanup!
+            clearInterval(interval);
         };
     }, []);
 
     useEffect(() => {
-        // ✅ CORRECT - Cleanup timeout
-        const timeoutId = setTimeout(() => {
-            console.log('Delayed action');
-        }, 5000);
+        const handleResize = () => console.log('Resized');
 
+        window.addEventListener('resize', handleResize);
+
+        // ✅ CLEANUP
         return () => {
-            clearTimeout(timeoutId);  // Cleanup!
+            window.removeEventListener('resize', handleResize);
         };
     }, []);
 
-    return <div>{count}</div>;
-};
-```
-
-### Cleanup Event Listeners
-
-```typescript
-useEffect(() => {
-    const handleResize = () => {
-        console.log('Resized');
-    };
-
-    window.addEventListener('resize', handleResize);
-
-    return () => {
-        window.removeEventListener('resize', handleResize);  // Cleanup!
-    };
-}, []);
-```
-
-### Abort Controllers for Fetch
-
-```typescript
-useEffect(() => {
-    const abortController = new AbortController();
-
-    fetch('/api/data', { signal: abortController.signal })
-        .then(response => response.json())
-        .then(data => setState(data))
-        .catch(error => {
-            if (error.name === 'AbortError') {
-                console.log('Fetch aborted');
-            }
-        });
-
-    return () => {
-        abortController.abort();  // Cleanup!
-    };
-}, []);
-```
-
-**Note**: With TanStack Query, this is handled automatically.
-
----
-
-## Form Performance
-
-### Watch Specific Fields (Not All)
-
-```typescript
-import { useForm } from 'react-hook-form';
-
-export const MyForm: React.FC = () => {
-    const { register, watch, handleSubmit } = useForm();
-
-    // ❌ AVOID - Watches all fields, re-renders on any change
-    const formValues = watch();
-
-    // ✅ CORRECT - Watch only what you need
-    const username = watch('username');
-    const email = watch('email');
-
-    // Or multiple specific fields
-    const [username, email] = watch(['username', 'email']);
-
-    return (
-        <form onSubmit={handleSubmit(onSubmit)}>
-            <input {...register('username')} />
-            <input {...register('email')} />
-            <input {...register('password')} />
-
-            {/* Only re-renders when username/email change */}
-            <p>Username: {username}, Email: {email}</p>
-        </form>
-    );
-};
+    return <div>Content</div>;
+}
 ```
 
 ---
 
-## List Rendering Optimization
+## Best Practices Summary
 
-### Key Prop Usage
+### DO:
 
+**✅ Use Server Components by default**
 ```typescript
-// ✅ CORRECT - Stable unique keys
-{items.map(item => (
-    <ListItem key={item.id}>
-        {item.name}
-    </ListItem>
-))}
-
-// ❌ AVOID - Index as key (unstable if list changes)
-{items.map((item, index) => (
-    <ListItem key={index}>  // WRONG if list reorders
-        {item.name}
-    </ListItem>
-))}
+// Fastest - no client JS
+export default async function Page() {
+    const data = await getData();
+    return <Display data={data} />;
+}
 ```
 
-### Memoized List Items
-
+**✅ Use next/image for images**
 ```typescript
-const ListItem = React.memo<ListItemProps>(({ item, onAction }) => {
-    return (
-        <Box onClick={() => onAction(item.id)}>
-            {item.name}
-        </Box>
-    );
-});
-
-export const List: React.FC<{ items: Item[] }> = ({ items }) => {
-    const handleAction = useCallback((id: string) => {
-        console.log('Action:', id);
-    }, []);
-
-    return (
-        <Box>
-            {items.map(item => (
-                <ListItem
-                    key={item.id}
-                    item={item}
-                    onAction={handleAction}
-                />
-            ))}
-        </Box>
-    );
-};
+<Image src="/photo.jpg" width={400} height={300} alt="Photo" />
 ```
 
----
-
-## Preventing Component Re-initialization
-
-### The Problem
-
+**✅ Use ISR for semi-static pages**
 ```typescript
-// ❌ AVOID - Component recreated on every render
-export const Parent: React.FC = () => {
-    // New component definition each render!
-    const ChildComponent = () => <div>Child</div>;
-
-    return <ChildComponent />;  // Unmounts and remounts every render
-};
+export const revalidate = 60; // Revalidate every 60s
 ```
 
-### The Solution
-
+**✅ Stream with Suspense**
 ```typescript
-// ✅ CORRECT - Define outside or use useMemo
-const ChildComponent: React.FC = () => <div>Child</div>;
-
-export const Parent: React.FC = () => {
-    return <ChildComponent />;  // Stable component
-};
-
-// ✅ OR if dynamic, use useMemo
-export const Parent: React.FC<{ config: Config }> = ({ config }) => {
-    const DynamicComponent = useMemo(() => {
-        return () => <div>{config.title}</div>;
-    }, [config.title]);
-
-    return <DynamicComponent />;
-};
+<Suspense fallback={<Skeleton />}>
+    <SlowComponent />
+</Suspense>
 ```
 
----
-
-## Lazy Loading Heavy Dependencies
-
-### Code Splitting
-
+**✅ Parallel data fetching**
 ```typescript
-// ❌ AVOID - Import heavy libraries at top level
-import jsPDF from 'jspdf';  // Large library loaded immediately
-import * as XLSX from 'xlsx';  // Large library loaded immediately
+const [data1, data2] = await Promise.all([getData1(), getData2()]);
+```
 
-// ✅ CORRECT - Dynamic import when needed
-const handleExportPDF = async () => {
-    const { jsPDF } = await import('jspdf');
-    const doc = new jsPDF();
-    // Use it
-};
+### DON'T:
 
-const handleExportExcel = async () => {
-    const XLSX = await import('xlsx');
-    // Use it
-};
+**❌ Don't fetch sequentially**
+```typescript
+// BAD - 450ms total
+const data1 = await getData1(); // 150ms
+const data2 = await getData2(); // 150ms
+const data3 = await getData3(); // 150ms
+
+// GOOD - 150ms total
+const [data1, data2, data3] = await Promise.all([
+    getData1(),
+    getData2(),
+    getData3(),
+]);
+```
+
+**❌ Don't use regular <img>**
+```typescript
+// BAD
+<img src="/photo.jpg" />
+
+// GOOD
+<Image src="/photo.jpg" width={400} height={300} alt="Photo" />
+```
+
+**❌ Don't make everything dynamic**
+```typescript
+// BAD - slower
+export const dynamic = 'force-dynamic';
+
+// GOOD - use ISR when possible
+export const revalidate = 60;
 ```
 
 ---
 
 ## Summary
 
-**Performance Checklist:**
-- ✅ `useMemo` for expensive computations (filter, sort, map)
-- ✅ `useCallback` for functions passed to children
-- ✅ `React.memo` for expensive components
-- ✅ Debounce search/filter (300-500ms)
-- ✅ Cleanup timeouts/intervals in useEffect
-- ✅ Watch specific form fields (not all)
-- ✅ Stable keys in lists
-- ✅ Lazy load heavy libraries
-- ✅ Code splitting with React.lazy
+**Next.js 15 Performance Checklist:**
+
+1. **Server Components** - Default to server, use client sparingly
+2. **Static Rendering** - Use ISR for semi-static pages
+3. **Image Optimization** - Always use next/image
+4. **Font Optimization** - Use next/font
+5. **Streaming** - Suspense for progressive rendering
+6. **Parallel Fetching** - Promise.all() for independent data
+7. **Code Splitting** - Automatic per-route
+8. **Memoization** - useMemo/useCallback in Client Components
+9. **Debouncing** - 300-500ms for search
+10. **Cleanup** - Always cleanup effects
+
+**Performance Hierarchy (fastest → slowest):**
+1. Static (build time) - CDN cached
+2. ISR (revalidate: 60) - Mostly static
+3. Server Component (dynamic) - Server render per-request
+4. Client Component - Browser render + JavaScript
 
 **See Also:**
-- [component-patterns.md](component-patterns.md) - Lazy loading
-- [data-fetching.md](data-fetching.md) - TanStack Query optimization
-- [complete-examples.md](complete-examples.md) - Performance patterns in context
+- [server-components.md](server-components.md) - Server Component patterns
+- [data-fetching.md](data-fetching.md) - Fetching strategies
+- [loading-and-error-states.md](loading-and-error-states.md) - Streaming
+- [complete-examples.md](complete-examples.md) - Real examples

@@ -1,331 +1,624 @@
 # Common Patterns
 
-Frequently used patterns for forms, authentication, DataGrid, dialogs, and other common UI elements.
+Frequently used patterns for authentication, forms, dialogs, search/filtering, and other common UI elements in Next.js 15 App Router applications.
 
 ---
 
-## Authentication with useAuth
+## Authentication Patterns
 
-### Getting Current User
+### Getting Current User in Server Components
 
 ```typescript
-import { useAuth } from '@/hooks/useAuth';
+// app/dashboard/page.tsx
+import { auth } from '@/lib/auth';
+import { redirect } from 'next/navigation';
 
-export const MyComponent: React.FC = () => {
-    const { user } = useAuth();
+export default async function DashboardPage() {
+    const session = await auth();
+
+    if (!session?.user) {
+        redirect('/login');
+    }
 
     // Available properties:
-    // - user.id: string
-    // - user.email: string
-    // - user.username: string
-    // - user.roles: string[]
+    // - session.user.id: string
+    // - session.user.email: string
+    // - session.user.name: string
+    // - session.user.role: string
 
     return (
         <div>
-            <p>Logged in as: {user.email}</p>
-            <p>Username: {user.username}</p>
-            <p>Roles: {user.roles.join(', ')}</p>
+            <h1>Dashboard</h1>
+            <p>Logged in as: {session.user.email}</p>
+            <p>Name: {session.user.name}</p>
+            <p>Role: {session.user.role}</p>
         </div>
     );
-};
+}
 ```
 
-**NEVER make direct API calls for auth** - always use `useAuth` hook.
+### Getting Current User in Client Components
+
+```typescript
+// features/profile/components/user-menu.tsx
+'use client';
+
+import { useSession } from 'next-auth/react';
+
+export function UserMenu() {
+    const { data: session } = useSession();
+
+    if (!session?.user) {
+        return null;
+    }
+
+    return (
+        <div>
+            <p>Welcome, {session.user.name}</p>
+            <p>{session.user.email}</p>
+        </div>
+    );
+}
+```
+
+**Rules:**
+- ✅ Use `auth()` in Server Components (page.tsx, layout.tsx)
+- ✅ Use `useSession()` in Client Components (interactive UI)
+- ❌ NEVER make direct API calls for auth - use auth library
 
 ---
 
-## Forms with React Hook Form
+## Forms with Server Actions
 
-### Basic Form
+### Basic Form with Server Action
 
 ```typescript
-import { useForm } from 'react-hook-form';
-import { zodResolver } from '@hookform/resolvers/zod';
-import { z } from 'zod';
-import { TextField, Button } from '@mui/material';
-import { useMuiSnackbar } from '@/hooks/useMuiSnackbar';
+// actions/user-actions.ts
+'use server';
 
-// Zod schema for validation
-const formSchema = z.object({
+import { z } from 'zod';
+import { revalidatePath } from 'next/cache';
+
+const userSchema = z.object({
     username: z.string().min(3, 'Username must be at least 3 characters'),
     email: z.string().email('Invalid email address'),
     age: z.number().min(18, 'Must be 18 or older'),
 });
 
-type FormData = z.infer<typeof formSchema>;
-
-export const MyForm: React.FC = () => {
-    const { showSuccess, showError } = useMuiSnackbar();
-
-    const { register, handleSubmit, formState: { errors } } = useForm<FormData>({
-        resolver: zodResolver(formSchema),
-        defaultValues: {
-            username: '',
-            email: '',
-            age: 18,
-        },
+export async function createUser(formData: FormData) {
+    // Extract and validate data
+    const parsed = userSchema.safeParse({
+        username: formData.get('username'),
+        email: formData.get('email'),
+        age: Number(formData.get('age')),
     });
 
-    const onSubmit = async (data: FormData) => {
-        try {
-            await api.submitForm(data);
-            showSuccess('Form submitted successfully');
-        } catch (error) {
-            showError('Failed to submit form');
+    if (!parsed.success) {
+        return {
+            success: false,
+            errors: parsed.error.flatten().fieldErrors,
+        };
+    }
+
+    try {
+        // Call your backend API
+        const response = await fetch(`${process.env.API_URL}/users`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(parsed.data),
+        });
+
+        if (!response.ok) {
+            throw new Error('Failed to create user');
         }
-    };
+
+        revalidatePath('/users');
+        return { success: true };
+    } catch (error) {
+        return {
+            success: false,
+            errors: { _form: ['Failed to create user'] },
+        };
+    }
+}
+```
+
+```typescript
+// features/users/components/create-user-form.tsx
+'use client';
+
+import { useState, useTransition } from 'react';
+import { createUser } from '@/actions/user-actions';
+import { Input } from '@/components/ui/input';
+import { Button } from '@/components/ui/button';
+import { Label } from '@/components/ui/label';
+
+export function CreateUserForm() {
+    const [isPending, startTransition] = useTransition();
+    const [errors, setErrors] = useState<Record<string, string[]>>({});
+
+    async function handleSubmit(formData: FormData) {
+        startTransition(async () => {
+            const result = await createUser(formData);
+
+            if (!result.success && result.errors) {
+                setErrors(result.errors);
+            } else {
+                setErrors({});
+                // Reset form or show success message
+            }
+        });
+    }
 
     return (
-        <form onSubmit={handleSubmit(onSubmit)}>
-            <TextField
-                {...register('username')}
-                label='Username'
-                error={!!errors.username}
-                helperText={errors.username?.message}
-            />
+        <form action={handleSubmit} className="space-y-4">
+            <div>
+                <Label htmlFor="username">Username</Label>
+                <Input
+                    id="username"
+                    name="username"
+                    type="text"
+                />
+                {errors.username && (
+                    <p className="text-sm text-red-500">{errors.username[0]}</p>
+                )}
+            </div>
 
-            <TextField
-                {...register('email')}
-                label='Email'
-                error={!!errors.email}
-                helperText={errors.email?.message}
-                type='email'
-            />
+            <div>
+                <Label htmlFor="email">Email</Label>
+                <Input
+                    id="email"
+                    name="email"
+                    type="email"
+                />
+                {errors.email && (
+                    <p className="text-sm text-red-500">{errors.email[0]}</p>
+                )}
+            </div>
 
-            <TextField
-                {...register('age', { valueAsNumber: true })}
-                label='Age'
-                error={!!errors.age}
-                helperText={errors.age?.message}
-                type='number'
-            />
+            <div>
+                <Label htmlFor="age">Age</Label>
+                <Input
+                    id="age"
+                    name="age"
+                    type="number"
+                />
+                {errors.age && (
+                    <p className="text-sm text-red-500">{errors.age[0]}</p>
+                )}
+            </div>
 
-            <Button type='submit' variant='contained'>
-                Submit
+            {errors._form && (
+                <p className="text-sm text-red-500">{errors._form[0]}</p>
+            )}
+
+            <Button type="submit" disabled={isPending}>
+                {isPending ? 'Creating...' : 'Create User'}
             </Button>
         </form>
     );
-};
+}
 ```
 
 ---
 
 ## Dialog Component Pattern
 
-### Standard Dialog Structure
-
-From BEST_PRACTICES.md - All dialogs should have:
-- Icon in title
-- Close button (X)
-- Action buttons at bottom
+### ShadCN Dialog with Form
 
 ```typescript
-import { Dialog, DialogTitle, DialogContent, DialogActions, Button, IconButton } from '@mui/material';
-import { Close, Info } from '@mui/icons-material';
+// features/users/components/add-user-dialog.tsx
+'use client';
 
-interface MyDialogProps {
-    open: boolean;
-    onClose: () => void;
-    onConfirm: () => void;
-}
+import { useState, useTransition } from 'react';
+import {
+    Dialog,
+    DialogContent,
+    DialogHeader,
+    DialogTitle,
+    DialogTrigger,
+} from '@/components/ui/dialog';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { UserPlus } from 'lucide-react';
+import { createUser } from '@/actions/user-actions';
 
-export const MyDialog: React.FC<MyDialogProps> = ({ open, onClose, onConfirm }) => {
+export function AddUserDialog() {
+    const [open, setOpen] = useState(false);
+    const [isPending, startTransition] = useTransition();
+    const [errors, setErrors] = useState<Record<string, string[]>>({});
+
+    async function handleSubmit(formData: FormData) {
+        startTransition(async () => {
+            const result = await createUser(formData);
+
+            if (result.success) {
+                setOpen(false);
+                setErrors({});
+            } else if (result.errors) {
+                setErrors(result.errors);
+            }
+        });
+    }
+
     return (
-        <Dialog open={open} onClose={onClose} maxWidth='sm' fullWidth>
-            <DialogTitle>
-                <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                        <Info color='primary' />
-                        Dialog Title
-                    </Box>
-                    <IconButton onClick={onClose} size='small'>
-                        <Close />
-                    </IconButton>
-                </Box>
-            </DialogTitle>
-
-            <DialogContent>
-                {/* Content here */}
-            </DialogContent>
-
-            <DialogActions>
-                <Button onClick={onClose}>Cancel</Button>
-                <Button onClick={onConfirm} variant='contained'>
-                    Confirm
+        <Dialog open={open} onOpenChange={setOpen}>
+            <DialogTrigger asChild>
+                <Button>
+                    <UserPlus className="mr-2 h-4 w-4" />
+                    Add User
                 </Button>
-            </DialogActions>
+            </DialogTrigger>
+            <DialogContent>
+                <DialogHeader>
+                    <DialogTitle>Add New User</DialogTitle>
+                </DialogHeader>
+                <form action={handleSubmit} className="space-y-4">
+                    <div>
+                        <Label htmlFor="name">Name</Label>
+                        <Input
+                            id="name"
+                            name="name"
+                            placeholder="John Doe"
+                        />
+                        {errors.name && (
+                            <p className="text-sm text-red-500">{errors.name[0]}</p>
+                        )}
+                    </div>
+
+                    <div>
+                        <Label htmlFor="email">Email</Label>
+                        <Input
+                            id="email"
+                            name="email"
+                            type="email"
+                            placeholder="john@example.com"
+                        />
+                        {errors.email && (
+                            <p className="text-sm text-red-500">{errors.email[0]}</p>
+                        )}
+                    </div>
+
+                    {errors._form && (
+                        <p className="text-sm text-red-500">{errors._form[0]}</p>
+                    )}
+
+                    <div className="flex justify-end gap-2">
+                        <Button
+                            type="button"
+                            variant="outline"
+                            onClick={() => setOpen(false)}
+                        >
+                            Cancel
+                        </Button>
+                        <Button type="submit" disabled={isPending}>
+                            {isPending ? 'Adding...' : 'Add User'}
+                        </Button>
+                    </div>
+                </form>
+            </DialogContent>
         </Dialog>
     );
-};
+}
 ```
 
 ---
 
-## DataGrid Wrapper Pattern
+## Search and Filtering Patterns
 
-### Wrapper Component Contract
-
-From BEST_PRACTICES.md - DataGrid wrappers should accept:
-
-**Required Props:**
-- `rows`: Data array
-- `columns`: Column definitions
-- Loading/error states
-
-**Optional Props:**
-- Toolbar components
-- Custom actions
-- Initial state
+### Client-Side Search Hook
 
 ```typescript
-import { DataGridPro } from '@mui/x-data-grid-pro';
-import type { GridColDef } from '@mui/x-data-grid-pro';
+// features/orders/hooks/use-search-orders.ts
+'use client';
 
-interface DataGridWrapperProps {
-    rows: any[];
-    columns: GridColDef[];
-    loading?: boolean;
-    toolbar?: React.ReactNode;
-    onRowClick?: (row: any) => void;
+import { useState, useMemo } from 'react';
+import { useDebounce } from '@/hooks/use-debounce';
+import type { Order } from '@/types/order';
+
+export function useSearchOrders(orders: Order[]) {
+    const [searchTerm, setSearchTerm] = useState('');
+    const [statusFilter, setStatusFilter] = useState<string>('all');
+
+    const debouncedSearch = useDebounce(searchTerm, 300);
+
+    const filteredOrders = useMemo(() => {
+        let filtered = orders;
+
+        // Apply search filter
+        if (debouncedSearch) {
+            filtered = filtered.filter(order =>
+                order.customerName.toLowerCase().includes(debouncedSearch.toLowerCase()) ||
+                order.orderNumber.toLowerCase().includes(debouncedSearch.toLowerCase())
+            );
+        }
+
+        // Apply status filter
+        if (statusFilter !== 'all') {
+            filtered = filtered.filter(order => order.status === statusFilter);
+        }
+
+        return filtered;
+    }, [orders, debouncedSearch, statusFilter]);
+
+    return {
+        searchTerm,
+        setSearchTerm,
+        statusFilter,
+        setStatusFilter,
+        filteredOrders,
+    };
+}
+```
+
+### Search Component Using Hook
+
+```typescript
+// features/orders/components/orders-list.tsx
+'use client';
+
+import { Input } from '@/components/ui/input';
+import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+} from '@/components/ui/select';
+import { useSearchOrders } from '../hooks/use-search-orders';
+import type { Order } from '@/types/order';
+
+interface OrdersListProps {
+    orders: Order[];
 }
 
-export const DataGridWrapper: React.FC<DataGridWrapperProps> = ({
-    rows,
-    columns,
-    loading = false,
-    toolbar,
-    onRowClick,
-}) => {
+export function OrdersList({ orders }: OrdersListProps) {
+    const {
+        searchTerm,
+        setSearchTerm,
+        statusFilter,
+        setStatusFilter,
+        filteredOrders,
+    } = useSearchOrders(orders);
+
     return (
-        <DataGridPro
-            rows={rows}
-            columns={columns}
-            loading={loading}
-            slots={{ toolbar: toolbar ? () => toolbar : undefined }}
-            onRowClick={(params) => onRowClick?.(params.row)}
-            // Standard configuration
-            pagination
-            pageSizeOptions={[25, 50, 100]}
-            initialState={{
-                pagination: { paginationModel: { pageSize: 25 } },
-            }}
-        />
+        <div className="space-y-4">
+            <div className="flex gap-4">
+                <Input
+                    placeholder="Search orders..."
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    className="max-w-sm"
+                />
+                <Select value={statusFilter} onValueChange={setStatusFilter}>
+                    <SelectTrigger className="w-[180px]">
+                        <SelectValue placeholder="Filter by status" />
+                    </SelectTrigger>
+                    <SelectContent>
+                        <SelectItem value="all">All</SelectItem>
+                        <SelectItem value="pending">Pending</SelectItem>
+                        <SelectItem value="completed">Completed</SelectItem>
+                        <SelectItem value="cancelled">Cancelled</SelectItem>
+                    </SelectContent>
+                </Select>
+            </div>
+
+            <div className="space-y-2">
+                {filteredOrders.map((order) => (
+                    <div key={order.id} className="border p-4 rounded-lg">
+                        <p className="font-semibold">{order.customerName}</p>
+                        <p className="text-sm text-muted-foreground">
+                            Order #{order.orderNumber}
+                        </p>
+                    </div>
+                ))}
+            </div>
+        </div>
     );
-};
+}
 ```
 
 ---
 
-## Mutation Patterns
+## Data Mutation Patterns
 
-### Update with Cache Invalidation
+### Update with Revalidation
 
 ```typescript
-import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { useMuiSnackbar } from '@/hooks/useMuiSnackbar';
+// actions/order-actions.ts
+'use server';
 
-export const useUpdateEntity = () => {
-    const queryClient = useQueryClient();
-    const { showSuccess, showError } = useMuiSnackbar();
+import { z } from 'zod';
+import { revalidatePath, revalidateTag } from 'next/cache';
+import { auth } from '@/lib/auth';
 
-    return useMutation({
-        mutationFn: ({ id, data }: { id: number; data: any }) =>
-            api.updateEntity(id, data),
+const updateOrderSchema = z.object({
+    status: z.enum(['pending', 'processing', 'completed', 'cancelled']),
+    notes: z.string().optional(),
+});
 
-        onSuccess: (result, variables) => {
-            // Invalidate affected queries
-            queryClient.invalidateQueries({ queryKey: ['entity', variables.id] });
-            queryClient.invalidateQueries({ queryKey: ['entities'] });
+export async function updateOrder(orderId: string, formData: FormData) {
+    // Check authentication
+    const session = await auth();
+    if (!session) {
+        return { success: false, errors: { _form: ['Not authenticated'] } };
+    }
 
-            showSuccess('Entity updated');
-        },
-
-        onError: () => {
-            showError('Failed to update entity');
-        },
+    // Validate input
+    const parsed = updateOrderSchema.safeParse({
+        status: formData.get('status'),
+        notes: formData.get('notes'),
     });
-};
 
-// Usage
-const updateEntity = useUpdateEntity();
+    if (!parsed.success) {
+        return {
+            success: false,
+            errors: parsed.error.flatten().fieldErrors,
+        };
+    }
 
-const handleSave = () => {
-    updateEntity.mutate({ id: 123, data: { name: 'New Name' } });
-};
+    try {
+        const response = await fetch(`${process.env.API_URL}/orders/${orderId}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(parsed.data),
+        });
+
+        if (!response.ok) {
+            throw new Error('Failed to update order');
+        }
+
+        // Revalidate specific paths
+        revalidatePath(`/orders/${orderId}`);
+        revalidatePath('/orders');
+
+        // Or revalidate by tag
+        revalidateTag('orders');
+
+        return { success: true };
+    } catch (error) {
+        return {
+            success: false,
+            errors: { _form: ['Failed to update order'] },
+        };
+    }
+}
 ```
 
 ---
 
 ## State Management Patterns
 
-### TanStack Query for Server State (PRIMARY)
+### Server Components for Data (PRIMARY)
 
-Use TanStack Query for **all server data**:
-- Fetching: useSuspenseQuery
-- Mutations: useMutation
-- Caching: Automatic
-- Synchronization: Built-in
+Use Server Components for **all server data**:
+- Fetching: async/await in page.tsx
+- Caching: Next.js automatic cache
+- Revalidation: revalidatePath/revalidateTag
 
 ```typescript
-// ✅ CORRECT - TanStack Query for server data
-const { data: users } = useSuspenseQuery({
-    queryKey: ['users'],
-    queryFn: () => userApi.getUsers(),
-});
+// ✅ CORRECT - Server Component fetches data
+// app/orders/page.tsx
+export default async function OrdersPage() {
+    const orders = await fetch(`${process.env.API_URL}/orders`, {
+        next: { revalidate: 60 }, // Cache for 60 seconds
+    }).then(res => res.json());
+
+    return <OrdersList orders={orders} />;
+}
 ```
 
 ### useState for UI State
 
 Use `useState` for **local UI state only**:
-- Form inputs (uncontrolled)
+- Form inputs
 - Modal open/closed
 - Selected tab
 - Temporary UI flags
 
 ```typescript
 // ✅ CORRECT - useState for UI state
-const [modalOpen, setModalOpen] = useState(false);
-const [selectedTab, setSelectedTab] = useState(0);
+'use client';
+
+export function OrderFilters() {
+    const [modalOpen, setModalOpen] = useState(false);
+    const [selectedTab, setSelectedTab] = useState(0);
+
+    return (
+        // ... UI
+    );
+}
 ```
 
-### Zustand for Global Client State (Minimal)
+### URL Search Params for Sharable State
 
-Use Zustand only for **global client state**:
-- Theme preference
-- Sidebar collapsed state
-- User preferences (not from server)
+Use search params for state that should be shareable/bookmarkable:
 
 ```typescript
-import { create } from 'zustand';
-
-interface AppState {
-    sidebarOpen: boolean;
-    toggleSidebar: () => void;
+// app/orders/page.tsx
+interface PageProps {
+    searchParams: { status?: string; page?: string };
 }
 
-export const useAppState = create<AppState>((set) => ({
-    sidebarOpen: true,
-    toggleSidebar: () => set((state) => ({ sidebarOpen: !state.sidebarOpen })),
-}));
+export default async function OrdersPage({ searchParams }: PageProps) {
+    const status = searchParams.status || 'all';
+    const page = Number(searchParams.page) || 1;
+
+    const orders = await fetch(
+        `${process.env.API_URL}/orders?status=${status}&page=${page}`
+    ).then(res => res.json());
+
+    return <OrdersList orders={orders} />;
+}
 ```
 
-**Avoid prop drilling** - use context or Zustand instead.
+**Avoid prop drilling** - pass data from Server Component to Client Component directly.
+
+---
+
+## Toast Notifications Pattern
+
+### Using Sonner for Toasts
+
+```typescript
+// features/orders/components/delete-order-button.tsx
+'use client';
+
+import { useTransition } from 'react';
+import { Button } from '@/components/ui/button';
+import { toast } from 'sonner';
+import { deleteOrder } from '@/actions/order-actions';
+
+interface DeleteOrderButtonProps {
+    orderId: string;
+}
+
+export function DeleteOrderButton({ orderId }: DeleteOrderButtonProps) {
+    const [isPending, startTransition] = useTransition();
+
+    function handleDelete() {
+        startTransition(async () => {
+            const result = await deleteOrder(orderId);
+
+            if (result.success) {
+                toast.success('Order deleted successfully');
+            } else {
+                toast.error(result.errors?._form?.[0] || 'Failed to delete order');
+            }
+        });
+    }
+
+    return (
+        <Button
+            variant="destructive"
+            onClick={handleDelete}
+            disabled={isPending}
+        >
+            {isPending ? 'Deleting...' : 'Delete'}
+        </Button>
+    );
+}
+```
 
 ---
 
 ## Summary
 
 **Common Patterns:**
-- ✅ useAuth hook for current user (id, email, roles, username)
-- ✅ React Hook Form + Zod for forms
-- ✅ Dialog with icon + close button
-- ✅ DataGrid wrapper contracts
-- ✅ Mutations with cache invalidation
-- ✅ TanStack Query for server state
-- ✅ useState for UI state
-- ✅ Zustand for global client state (minimal)
+- ✅ `auth()` for Server Components, `useSession()` for Client Components
+- ✅ Server Actions in actions/*.ts for all mutations
+- ✅ Zod validation in Server Actions
+- ✅ ShadCN Dialog components with forms
+- ✅ Client-side search/filter hooks
+- ✅ useTransition for pending states
+- ✅ revalidatePath/revalidateTag after mutations
+- ✅ Server Components for data fetching
+- ✅ useState for UI state only
+- ✅ Search params for sharable state
+- ✅ Sonner for toast notifications
 
 **See Also:**
-- [data-fetching.md](data-fetching.md) - TanStack Query patterns
+- [data-fetching.md](data-fetching.md) - Server Component patterns
 - [component-patterns.md](component-patterns.md) - Component structure
 - [loading-and-error-states.md](loading-and-error-states.md) - Error handling
