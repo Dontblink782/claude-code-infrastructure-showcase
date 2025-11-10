@@ -3,7 +3,8 @@
     "allow": [
       "Bash(for file in /root/git/claude-code-infrastructure-showcase/.claude/skills/frontend-dev-guidelines/resources/*.md)",
       "Bash(done)",
-      "WebFetch(domain:supabase.com)"
+      "WebFetch(domain:supabase.com)",
+      "WebFetch(domain:context7.com)"
     ],
     "deny": [],
     "ask": []

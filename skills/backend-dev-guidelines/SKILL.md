@@ -1,6 +1,6 @@
 ---
 name: backend-dev-guidelines
-description: Comprehensive backend development guide for Node.js/Express/TypeScript microservices. Use when creating routes, controllers, services, repositories, middleware, or working with Express APIs, Prisma database access, Sentry error tracking, Zod validation, unifiedConfig, dependency injection, or async patterns. Covers layered architecture (routes → controllers → services → repositories), BaseController pattern, error handling, performance monitoring, testing strategies, and migration from legacy patterns.
+description: Comprehensive backend development guide for Node.js/Express/TypeScript microservices. Use when creating routes, controllers, services, repositories, middleware, or working with Express APIs, Prisma database access, Sentry error tracking, Zod validation, dependency injection, or async patterns. Covers layered architecture (routes → controllers → services → repositories), BaseController pattern, error handling, performance monitoring, testing strategies, and migration from legacy patterns.
 ---
 
 # Backend Development Guidelines
@@ -34,13 +34,11 @@ Automatically activates when working on:
 - [ ] **Validation**: Zod schema
 - [ ] **Sentry**: Error tracking
 - [ ] **Tests**: Unit + integration tests
-- [ ] **Config**: Use unifiedConfig
 
 ### New Microservice Checklist
 
 - [ ] Directory structure (see [architecture-overview.md](architecture-overview.md))
 - [ ] instrument.ts for Sentry
-- [ ] unifiedConfig setup
 - [ ] BaseController class
 - [ ] Middleware stack
 - [ ] Error boundary
@@ -139,14 +137,14 @@ try {
 }
 ```
 
-### 4. Use unifiedConfig, NEVER process.env
+### 4. Use Configuration Pattern, NEVER Direct process.env
 
 ```typescript
 // ❌ NEVER
 const timeout = process.env.TIMEOUT_MS;
 
 // ✅ ALWAYS
-import { config } from './config/unifiedConfig';
+import { config } from './config';
 const timeout = config.timeouts.default;
 ```
 
@@ -193,7 +191,7 @@ import type { Prisma } from '@prisma/client';
 import * as Sentry from '@sentry/node';
 
 // Config
-import { config } from './config/unifiedConfig';
+import { config } from './config';
 
 // Middleware
 import { SSOMiddlewareClient } from './middleware/SSOMiddleware';
@@ -226,10 +224,10 @@ import { asyncErrorWrapper } from './middleware/errorBoundary';
 ## Anti-Patterns to Avoid
 
 ❌ Business logic in routes
-❌ Direct process.env usage
+❌ Direct process.env usage (use config pattern)
 ❌ Missing error handling
 ❌ No input validation
-❌ Direct Prisma everywhere
+❌ Direct Prisma usage (use repositories)
 ❌ console.log instead of Sentry
 
 ---
@@ -245,7 +243,6 @@ import { asyncErrorWrapper } from './middleware/errorBoundary';
 | Add error tracking | [sentry-and-monitoring.md](sentry-and-monitoring.md) |
 | Create middleware | [middleware-guide.md](middleware-guide.md) |
 | Database access | [database-patterns.md](database-patterns.md) |
-| Manage config | [configuration.md](configuration.md) |
 | Handle async/errors | [async-and-errors.md](async-and-errors.md) |
 | Write tests | [testing-guide.md](testing-guide.md) |
 | See examples | [complete-examples.md](complete-examples.md) |
@@ -275,9 +272,6 @@ Auth, audit, error boundaries, AsyncLocalStorage
 ### [database-patterns.md](database-patterns.md)
 PrismaService, repositories, transactions, optimization
 
-### [configuration.md](configuration.md)
-UnifiedConfig, environment configs, secrets
-
 ### [async-and-errors.md](async-and-errors.md)
 Async patterns, custom errors, asyncErrorWrapper
 
@@ -299,4 +293,4 @@ Full examples, refactoring guide
 
 **Skill Status**: COMPLETE ✅
 **Line Count**: < 500 ✅
-**Progressive Disclosure**: 11 resource files ✅
+**Progressive Disclosure**: 10 resource files ✅

@@ -1,15 +1,14 @@
-# Validation Patterns - Input Validation with Zod
+# Validation Patterns - Next.js + Supabase + Prisma
 
-Complete guide to input validation using Zod schemas for type-safe validation.
+Complete guide to input validation using Zod schemas in Next.js server actions and API routes.
 
 ## Table of Contents
 
 - [Why Zod?](#why-zod)
 - [Basic Zod Patterns](#basic-zod-patterns)
-- [Schema Examples from Codebase](#schema-examples-from-codebase)
-- [Route-Level Validation](#route-level-validation)
-- [Controller Validation](#controller-validation)
-- [DTO Pattern](#dto-pattern)
+- [Validation in Server Actions](#validation-in-server-actions)
+- [Validation with RLS Path](#validation-with-rls-path)
+- [Schema Examples](#schema-examples)
 - [Error Handling](#error-handling)
 - [Advanced Patterns](#advanced-patterns)
 
@@ -33,6 +32,11 @@ Complete guide to input validation using Zod schemas for type-safe validation.
 - ✅ Fast validation
 - ✅ Small bundle size
 - ✅ Tree-shakeable
+
+**Next.js Integration:**
+- ✅ Works seamlessly with Server Actions
+- ✅ Type-safe FormData parsing
+- ✅ Client/server validation reuse
 
 ### Migration from Joi
 
@@ -144,16 +148,425 @@ const nonEmptyArray = z.array(z.string()).nonempty();
 
 ---
 
-## Schema Examples from Codebase
+## Validation in Server Actions
 
-### Form Validation Schemas
+### Pattern 1: Server Action with Zod (Recommended)
 
-**File:** `/form/src/helpers/zodSchemas.ts`
+**When to use:** Complex business logic, transactions, server-side validation required.
 
 ```typescript
-import { z } from 'zod';
+// actions/posts.ts
+'use server'
+import { getCurrentUser } from '@/utils/supabase/server'
+import { prisma } from '@/lib/prisma'
+import { revalidatePath } from 'next/cache'
+import { z } from 'zod'
 
-// Question types enum
+// Define validation schema
+const createPostSchema = z.object({
+    title: z.string().min(3).max(150),
+    content: z.string().min(10).max(10000),
+    tags: z.array(z.string()).max(5).optional(),
+    published: z.boolean().default(false),
+})
+
+// Infer TypeScript type from schema
+type CreatePostInput = z.infer<typeof createPostSchema>
+
+export async function createPost(formData: FormData) {
+    // 1. Auth check
+    const user = await getCurrentUser()
+    if (!user) {
+        return { success: false, error: 'Unauthorized' }
+    }
+
+    // 2. Parse FormData to object
+    const rawData = {
+        title: formData.get('title'),
+        content: formData.get('content'),
+        tags: formData.get('tags')
+            ? JSON.parse(formData.get('tags') as string)
+            : undefined,
+        published: formData.get('published') === 'true',
+    }
+
+    // 3. Validate with Zod
+    const result = createPostSchema.safeParse(rawData)
+
+    if (!result.success) {
+        return {
+            success: false,
+            error: 'Validation failed',
+            details: result.error.errors,
+        }
+    }
+
+    // 4. Business logic with validated data
+    try {
+        const post = await prisma.post.create({
+            data: {
+                ...result.data,
+                userId: user.id,
+            },
+        })
+
+        revalidatePath('/posts')
+        return { success: true, data: post }
+    } catch (error) {
+        return {
+            success: false,
+            error: 'Failed to create post',
+        }
+    }
+}
+```
+
+### Client Component Usage
+
+```typescript
+// components/CreatePostForm.tsx
+'use client'
+import { createPost } from '@/actions/posts'
+import { useState, useTransition } from 'react'
+
+export function CreatePostForm() {
+    const [error, setError] = useState<string | null>(null)
+    const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
+    const [isPending, startTransition] = useTransition()
+
+    async function handleSubmit(formData: FormData) {
+        setError(null)
+        setFieldErrors({})
+
+        startTransition(async () => {
+            const result = await createPost(formData)
+
+            if (!result.success) {
+                setError(result.error)
+
+                // Display field-specific errors
+                if (result.details) {
+                    const errors: Record<string, string> = {}
+                    result.details.forEach((err) => {
+                        const field = err.path.join('.')
+                        errors[field] = err.message
+                    })
+                    setFieldErrors(errors)
+                }
+            }
+        })
+    }
+
+    return (
+        <form action={handleSubmit}>
+            {error && <div className="error">{error}</div>}
+
+            <div>
+                <input name="title" placeholder="Title" required />
+                {fieldErrors.title && (
+                    <span className="field-error">{fieldErrors.title}</span>
+                )}
+            </div>
+
+            <div>
+                <textarea name="content" placeholder="Content" required />
+                {fieldErrors.content && (
+                    <span className="field-error">{fieldErrors.content}</span>
+                )}
+            </div>
+
+            <button type="submit" disabled={isPending}>
+                {isPending ? 'Creating...' : 'Create Post'}
+            </button>
+        </form>
+    )
+}
+```
+
+### Pattern 2: Complex Transaction with Validation
+
+```typescript
+// actions/staff.ts
+'use server'
+import { getCurrentUser } from '@/utils/supabase/server'
+import { prisma } from '@/lib/prisma'
+import { revalidatePath } from 'next/cache'
+import { z } from 'zod'
+
+const addStaffSchema = z.object({
+    email: z.string().email(),
+    role: z.enum(['ADMIN', 'MANAGER', 'MEMBER']),
+    organizationId: z.string().uuid(),
+})
+
+export async function addStaffMember(formData: FormData) {
+    // 1. Auth
+    const user = await getCurrentUser()
+    if (!user) {
+        return { success: false, error: 'Unauthorized' }
+    }
+
+    // 2. Validate
+    const result = addStaffSchema.safeParse({
+        email: formData.get('email'),
+        role: formData.get('role'),
+        organizationId: formData.get('organizationId'),
+    })
+
+    if (!result.success) {
+        return {
+            success: false,
+            error: 'Validation failed',
+            details: result.error.errors,
+        }
+    }
+
+    const { email, role, organizationId } = result.data
+
+    try {
+        // 3. Transaction with business logic
+        const member = await prisma.$transaction(async (tx) => {
+            // Check admin permission
+            const membership = await tx.organizationMember.findFirst({
+                where: {
+                    userId: user.id,
+                    organizationId,
+                    role: 'ADMIN',
+                },
+            })
+
+            if (!membership) {
+                throw new Error('Only admins can add staff')
+            }
+
+            // Check limits
+            const org = await tx.organization.findUnique({
+                where: { id: organizationId },
+                include: { _count: { select: { members: true } } },
+            })
+
+            if (!org) {
+                throw new Error('Organization not found')
+            }
+
+            if (org._count.members >= org.maxMembers) {
+                throw new Error('Staff limit reached')
+            }
+
+            // Create/find user
+            let staffUser = await tx.user.findUnique({
+                where: { email },
+            })
+
+            if (!staffUser) {
+                staffUser = await tx.user.create({
+                    data: { email },
+                })
+            }
+
+            // Create membership
+            const newMember = await tx.organizationMember.create({
+                data: {
+                    userId: staffUser.id,
+                    organizationId,
+                    role,
+                    invitedBy: user.id,
+                },
+            })
+
+            // Audit log
+            await tx.auditLog.create({
+                data: {
+                    action: 'STAFF_ADDED',
+                    userId: user.id,
+                    organizationId,
+                    metadata: { staffUserId: staffUser.id, role },
+                },
+            })
+
+            return newMember
+        })
+
+        revalidatePath(`/dashboard/${organizationId}/team`)
+        return { success: true, member }
+    } catch (error) {
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : 'Failed to add staff',
+        }
+    }
+}
+```
+
+---
+
+## Validation with RLS Path
+
+### Pattern 3: RLS with Client-Side Validation
+
+**When to use:** Simple CRUD with straightforward auth, no complex business logic.
+
+```typescript
+// lib/validations/posts.ts
+import { z } from 'zod'
+
+export const createPostSchema = z.object({
+    title: z.string().min(3).max(150),
+    content: z.string().min(10).max(10000),
+    published: z.boolean().default(false),
+})
+
+export type CreatePostInput = z.infer<typeof createPostSchema>
+```
+
+```typescript
+// hooks/useCreatePost.ts
+'use client'
+import { createBrowserClient } from '@/utils/supabase/client'
+import { useState } from 'react'
+import { createPostSchema, CreatePostInput } from '@/lib/validations/posts'
+
+export function useCreatePost() {
+    const [loading, setLoading] = useState(false)
+    const [errors, setErrors] = useState<Record<string, string>>({})
+    const supabase = createBrowserClient()
+
+    async function createPost(input: CreatePostInput) {
+        setLoading(true)
+        setErrors({})
+
+        // Validate on client
+        const result = createPostSchema.safeParse(input)
+
+        if (!result.success) {
+            const fieldErrors: Record<string, string> = {}
+            result.error.errors.forEach((err) => {
+                const field = err.path.join('.')
+                fieldErrors[field] = err.message
+            })
+            setErrors(fieldErrors)
+            setLoading(false)
+            return { data: null, error: 'Validation failed' }
+        }
+
+        try {
+            // RLS handles auth check at database level
+            const { data, error } = await supabase
+                .from('posts')
+                .insert(result.data)
+                .select()
+                .single()
+
+            if (error) throw error
+            return { data, error: null }
+        } catch (error) {
+            return {
+                data: null,
+                error: error instanceof Error ? error.message : 'Failed to create post',
+            }
+        } finally {
+            setLoading(false)
+        }
+    }
+
+    return { createPost, loading, errors }
+}
+```
+
+```typescript
+// components/CreatePostForm.tsx
+'use client'
+import { useCreatePost } from '@/hooks/useCreatePost'
+import { useState } from 'react'
+import { useRouter } from 'next/navigation'
+
+export function CreatePostForm() {
+    const { createPost, loading, errors } = useCreatePost()
+    const [title, setTitle] = useState('')
+    const [content, setContent] = useState('')
+    const router = useRouter()
+
+    async function handleSubmit(e: FormEvent) {
+        e.preventDefault()
+
+        const { data, error } = await createPost({
+            title,
+            content,
+            published: false,
+        })
+
+        if (error) {
+            // Errors displayed via hook
+            return
+        }
+
+        router.push(`/posts/${data.id}`)
+        router.refresh()
+    }
+
+    return (
+        <form onSubmit={handleSubmit}>
+            <div>
+                <input
+                    value={title}
+                    onChange={(e) => setTitle(e.target.value)}
+                    placeholder="Title"
+                    required
+                />
+                {errors.title && <span className="error">{errors.title}</span>}
+            </div>
+
+            <div>
+                <textarea
+                    value={content}
+                    onChange={(e) => setContent(e.target.value)}
+                    placeholder="Content"
+                    required
+                />
+                {errors.content && <span className="error">{errors.content}</span>}
+            </div>
+
+            <button type="submit" disabled={loading}>
+                {loading ? 'Creating...' : 'Create Post'}
+            </button>
+        </form>
+    )
+}
+```
+
+---
+
+## Schema Examples
+
+### Multi-Tenant Staff Schema
+
+```typescript
+// lib/validations/staff.ts
+import { z } from 'zod'
+
+export const staffRoleSchema = z.enum(['ADMIN', 'MANAGER', 'MEMBER'])
+
+export const addStaffSchema = z.object({
+    email: z.string().email('Invalid email address'),
+    role: staffRoleSchema,
+    organizationId: z.string().uuid('Invalid organization ID'),
+})
+
+export const updateStaffSchema = z.object({
+    role: staffRoleSchema.optional(),
+    isActive: z.boolean().optional(),
+})
+
+export type AddStaffInput = z.infer<typeof addStaffSchema>
+export type UpdateStaffInput = z.infer<typeof updateStaffSchema>
+```
+
+### Form Builder Schema
+
+```typescript
+// lib/validations/forms.ts
+import { z } from 'zod'
+
 export const questionTypeSchema = z.enum([
     'input',
     'textbox',
@@ -163,333 +576,68 @@ export const questionTypeSchema = z.enum([
     'checkbox',
     'radio',
     'upload',
-]);
+])
 
-// Upload types
-export const uploadTypeSchema = z.array(
-    z.enum(['pdf', 'image', 'excel', 'video', 'powerpoint', 'word']).nullable()
-);
-
-// Input types
-export const inputTypeSchema = z
-    .enum(['date', 'number', 'input', 'currency'])
-    .nullable();
-
-// Question option
 export const questionOptionSchema = z.object({
     id: z.number().int().positive().optional(),
-    controlTag: z.string().max(150).nullable().optional(),
-    label: z.string().max(100).nullable().optional(),
+    label: z.string().max(100),
     order: z.number().int().min(0).default(0),
-});
+})
 
-// Question schema
 export const questionSchema = z.object({
     id: z.number().int().positive().optional(),
-    formID: z.number().int().positive(),
-    sectionID: z.number().int().positive().optional(),
-    options: z.array(questionOptionSchema).optional(),
-    label: z.string().max(500),
+    formId: z.number().int().positive(),
+    sectionId: z.number().int().positive().optional(),
+    label: z.string().min(1).max(500),
     description: z.string().max(5000).optional(),
     type: questionTypeSchema,
-    uploadTypes: uploadTypeSchema.optional(),
-    inputType: inputTypeSchema.optional(),
-    tags: z.array(z.string().max(150)).optional(),
-    required: z.boolean(),
-    isStandard: z.boolean().optional(),
-    deprecatedKey: z.string().nullable().optional(),
-    maxLength: z.number().int().positive().nullable().optional(),
-    isOptionsSorted: z.boolean().optional(),
-});
+    options: z.array(questionOptionSchema).optional(),
+    required: z.boolean().default(false),
+    maxLength: z.number().int().positive().optional(),
+})
 
-// Form section schema
 export const formSectionSchema = z.object({
     id: z.number().int().positive(),
-    formID: z.number().int().positive(),
-    questions: z.array(questionSchema).optional(),
-    label: z.string().max(500),
+    formId: z.number().int().positive(),
+    label: z.string().min(1).max(500),
     description: z.string().max(5000).optional(),
-    isStandard: z.boolean(),
-});
+    questions: z.array(questionSchema).optional(),
+})
 
-// Create form schema
 export const createFormSchema = z.object({
-    id: z.number().int().positive(),
-    label: z.string().max(150),
-    description: z.string().max(6000).nullable().optional(),
-    isPhase: z.boolean().optional(),
-    username: z.string(),
-});
+    label: z.string().min(1).max(150),
+    description: z.string().max(6000).optional(),
+    isPhase: z.boolean().default(false),
+})
 
-// Update order schema
-export const updateOrderSchema = z.object({
-    source: z.object({
-        index: z.number().int().min(0),
-        sectionID: z.number().int().min(0),
-    }),
-    destination: z.object({
-        index: z.number().int().min(0),
-        sectionID: z.number().int().min(0),
-    }),
-});
-
-// Controller-specific validation schemas
-export const createQuestionValidationSchema = z.object({
-    formID: z.number().int().positive(),
-    sectionID: z.number().int().positive(),
-    question: questionSchema,
-    index: z.number().int().min(0).nullable().optional(),
-    username: z.string(),
-});
-
-export const updateQuestionValidationSchema = z.object({
-    questionID: z.number().int().positive(),
-    username: z.string(),
-    question: questionSchema,
-});
+export type Question = z.infer<typeof questionSchema>
+export type FormSection = z.infer<typeof formSectionSchema>
+export type CreateFormInput = z.infer<typeof createFormSchema>
 ```
 
-### Proxy Relationship Schema
+### Workflow Schema
 
 ```typescript
-// Proxy relationship validation
-const createProxySchema = z.object({
-    originalUserID: z.string().min(1),
-    proxyUserID: z.string().min(1),
-    startsAt: z.string().datetime(),
-    expiresAt: z.string().datetime(),
-});
+// lib/validations/workflows.ts
+import { z } from 'zod'
 
-// With custom validation
-const createProxySchemaWithValidation = createProxySchema.refine(
-    (data) => new Date(data.expiresAt) > new Date(data.startsAt),
-    {
-        message: 'expiresAt must be after startsAt',
-        path: ['expiresAt'],
-    }
-);
-```
+export const workflowEntitySchema = z.enum(['Post', 'User', 'Comment', 'Order'])
 
-### Workflow Validation
+export const startWorkflowSchema = z.object({
+    workflowCode: z.string().min(1, 'Workflow code is required'),
+    entityType: workflowEntitySchema,
+    entityId: z.number().int().positive(),
+    dryRun: z.boolean().default(false),
+})
 
-```typescript
-// Workflow start schema
-const startWorkflowSchema = z.object({
-    workflowCode: z.string().min(1),
-    entityType: z.enum(['Post', 'User', 'Comment']),
-    entityID: z.number().int().positive(),
-    dryRun: z.boolean().optional().default(false),
-});
-
-// Workflow step completion schema
-const completeStepSchema = z.object({
-    stepInstanceID: z.number().int().positive(),
+export const completeStepSchema = z.object({
+    stepInstanceId: z.number().int().positive(),
     answers: z.record(z.string(), z.any()),
-    dryRun: z.boolean().optional().default(false),
-});
-```
+    comment: z.string().max(1000).optional(),
+})
 
----
-
-## Route-Level Validation
-
-### Pattern 1: Inline Validation
-
-```typescript
-// routes/proxyRoutes.ts
-import { z } from 'zod';
-
-const createProxySchema = z.object({
-    originalUserID: z.string().min(1),
-    proxyUserID: z.string().min(1),
-    startsAt: z.string().datetime(),
-    expiresAt: z.string().datetime(),
-});
-
-router.post(
-    '/',
-    SSOMiddlewareClient.verifyLoginStatus,
-    async (req, res) => {
-        try {
-            // Validate at route level
-            const validated = createProxySchema.parse(req.body);
-
-            // Delegate to service
-            const proxy = await proxyService.createProxyRelationship(validated);
-
-            res.status(201).json({ success: true, data: proxy });
-        } catch (error) {
-            if (error instanceof z.ZodError) {
-                return res.status(400).json({
-                    success: false,
-                    error: {
-                        message: 'Validation failed',
-                        details: error.errors,
-                    },
-                });
-            }
-            handler.handleException(res, error);
-        }
-    }
-);
-```
-
-**Pros:**
-- Quick and simple
-- Good for simple routes
-
-**Cons:**
-- Validation logic in routes
-- Harder to test
-- Not reusable
-
----
-
-## Controller Validation
-
-### Pattern 2: Controller Validation (Recommended)
-
-```typescript
-// validators/userSchemas.ts
-import { z } from 'zod';
-
-export const createUserSchema = z.object({
-    email: z.string().email(),
-    name: z.string().min(2).max(100),
-    roles: z.array(z.enum(['admin', 'operations', 'user'])),
-    isActive: z.boolean().default(true),
-});
-
-export const updateUserSchema = z.object({
-    email: z.string().email().optional(),
-    name: z.string().min(2).max(100).optional(),
-    roles: z.array(z.enum(['admin', 'operations', 'user'])).optional(),
-    isActive: z.boolean().optional(),
-});
-
-export type CreateUserDTO = z.infer<typeof createUserSchema>;
-export type UpdateUserDTO = z.infer<typeof updateUserSchema>;
-```
-
-```typescript
-// controllers/UserController.ts
-import { Request, Response } from 'express';
-import { BaseController } from './BaseController';
-import { UserService } from '../services/userService';
-import { createUserSchema, updateUserSchema } from '../validators/userSchemas';
-import { z } from 'zod';
-
-export class UserController extends BaseController {
-    private userService: UserService;
-
-    constructor() {
-        super();
-        this.userService = new UserService();
-    }
-
-    async createUser(req: Request, res: Response): Promise<void> {
-        try {
-            // Validate input
-            const validated = createUserSchema.parse(req.body);
-
-            // Call service
-            const user = await this.userService.createUser(validated);
-
-            this.handleSuccess(res, user, 'User created successfully', 201);
-        } catch (error) {
-            if (error instanceof z.ZodError) {
-                // Handle validation errors with 400 status
-                return this.handleError(error, res, 'createUser', 400);
-            }
-            this.handleError(error, res, 'createUser');
-        }
-    }
-
-    async updateUser(req: Request, res: Response): Promise<void> {
-        try {
-            // Validate params and body
-            const userId = req.params.id;
-            const validated = updateUserSchema.parse(req.body);
-
-            const user = await this.userService.updateUser(userId, validated);
-
-            this.handleSuccess(res, user, 'User updated successfully');
-        } catch (error) {
-            if (error instanceof z.ZodError) {
-                return this.handleError(error, res, 'updateUser', 400);
-            }
-            this.handleError(error, res, 'updateUser');
-        }
-    }
-}
-```
-
-**Pros:**
-- Clean separation
-- Reusable schemas
-- Easy to test
-- Type-safe DTOs
-
-**Cons:**
-- More files to manage
-
----
-
-## DTO Pattern
-
-### Type Inference from Schemas
-
-```typescript
-import { z } from 'zod';
-
-// Define schema
-const createUserSchema = z.object({
-    email: z.string().email(),
-    name: z.string(),
-    age: z.number().int().positive(),
-});
-
-// Infer TypeScript type from schema
-type CreateUserDTO = z.infer<typeof createUserSchema>;
-
-// Equivalent to:
-// type CreateUserDTO = {
-//     email: string;
-//     name: string;
-//     age: number;
-// }
-
-// Use in service
-class UserService {
-    async createUser(data: CreateUserDTO): Promise<User> {
-        // data is fully typed!
-        console.log(data.email); // ✅ TypeScript knows this exists
-        console.log(data.invalid); // ❌ TypeScript error!
-    }
-}
-```
-
-### Input vs Output Types
-
-```typescript
-// Input schema (what API receives)
-const createUserInputSchema = z.object({
-    email: z.string().email(),
-    name: z.string(),
-    password: z.string().min(8),
-});
-
-// Output schema (what API returns)
-const userOutputSchema = z.object({
-    id: z.string().uuid(),
-    email: z.string().email(),
-    name: z.string(),
-    createdAt: z.string().datetime(),
-    // password excluded!
-});
-
-type CreateUserInput = z.infer<typeof createUserInputSchema>;
-type UserOutput = z.infer<typeof userOutputSchema>;
+export type StartWorkflowInput = z.infer<typeof startWorkflowSchema>
+export type CompleteStepInput = z.infer<typeof completeStepSchema>
 ```
 
 ---
@@ -500,10 +648,10 @@ type UserOutput = z.infer<typeof userOutputSchema>;
 
 ```typescript
 try {
-    const validated = schema.parse(data);
+    const validated = schema.parse(data)
 } catch (error) {
     if (error instanceof z.ZodError) {
-        console.log(error.errors);
+        console.log(error.errors)
         // [
         //   {
         //     code: 'invalid_type',
@@ -524,48 +672,61 @@ const userSchema = z.object({
     email: z.string().email({ message: 'Please provide a valid email address' }),
     name: z.string().min(2, { message: 'Name must be at least 2 characters' }),
     age: z.number().int().positive({ message: 'Age must be a positive number' }),
-});
+})
 ```
 
-### Formatted Error Response
+### Server Action Error Response Pattern
 
 ```typescript
-// Helper function to format Zod errors
-function formatZodError(error: z.ZodError) {
-    return {
-        message: 'Validation failed',
-        errors: error.errors.map((err) => ({
-            field: err.path.join('.'),
-            message: err.message,
-            code: err.code,
-        })),
-    };
-}
+// actions/posts.ts
+export async function createPost(formData: FormData) {
+    const result = schema.safeParse(data)
 
-// In controller
-catch (error) {
-    if (error instanceof z.ZodError) {
-        return res.status(400).json({
+    if (!result.success) {
+        return {
             success: false,
-            error: formatZodError(error),
-        });
+            error: 'Validation failed',
+            details: result.error.errors.map((err) => ({
+                field: err.path.join('.'),
+                message: err.message,
+            })),
+        }
     }
-}
 
-// Response example:
-// {
-//   "success": false,
-//   "error": {
-//     "message": "Validation failed",
-//     "errors": [
-//       {
-//         "field": "email",
-//         "message": "Invalid email",
-//         "code": "invalid_string"
-//       }
-//     ]
-//   }
-// }
+    // ... rest of logic
+}
+```
+
+### Client-Side Error Display
+
+```typescript
+// components/CreatePostForm.tsx
+'use client'
+
+export function CreatePostForm() {
+    const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
+
+    async function handleSubmit(formData: FormData) {
+        const result = await createPost(formData)
+
+        if (!result.success && result.details) {
+            const errors: Record<string, string> = {}
+            result.details.forEach((err) => {
+                errors[err.field] = err.message
+            })
+            setFieldErrors(errors)
+        }
+    }
+
+    return (
+        <form action={handleSubmit}>
+            <input name="title" />
+            {fieldErrors.title && (
+                <span className="error">{fieldErrors.title}</span>
+            )}
+        </form>
+    )
+}
 ```
 
 ---
@@ -583,37 +744,41 @@ const submissionSchema = z.object({
     (data) => {
         // If type is UPDATE, postId is required
         if (data.type === 'UPDATE') {
-            return data.postId !== undefined;
+            return data.postId !== undefined
         }
-        return true;
+        return true
     },
     {
         message: 'postId is required when type is UPDATE',
         path: ['postId'],
     }
-);
+)
 ```
 
 ### Transform Data
 
 ```typescript
-// Transform strings to numbers
-const userSchema = z.object({
+// Transform FormData strings to proper types
+const formDataSchema = z.object({
     name: z.string(),
     age: z.string().transform((val) => parseInt(val, 10)),
-});
-
-// Transform dates
-const eventSchema = z.object({
-    name: z.string(),
+    tags: z.string().transform((str) => JSON.parse(str)),
     date: z.string().transform((str) => new Date(str)),
-});
+})
+
+// In server action
+const result = formDataSchema.parse({
+    name: formData.get('name'),
+    age: formData.get('age'), // "25" → 25
+    tags: formData.get('tags'), // '["a","b"]' → ["a", "b"]
+    date: formData.get('date'), // "2024-01-01" → Date object
+})
 ```
 
 ### Preprocess Data
 
 ```typescript
-// Trim strings before validation
+// Trim and normalize before validation
 const userSchema = z.object({
     email: z.preprocess(
         (val) => typeof val === 'string' ? val.trim().toLowerCase() : val,
@@ -623,16 +788,16 @@ const userSchema = z.object({
         (val) => typeof val === 'string' ? val.trim() : val,
         z.string().min(2)
     ),
-});
+})
 ```
 
 ### Union Types
 
 ```typescript
 // Multiple possible types
-const idSchema = z.union([z.string(), z.number()]);
+const idSchema = z.union([z.string(), z.number()])
 
-// Discriminated unions
+// Discriminated unions for different form types
 const notificationSchema = z.discriminatedUnion('type', [
     z.object({
         type: z.literal('email'),
@@ -644,26 +809,7 @@ const notificationSchema = z.discriminatedUnion('type', [
         phoneNumber: z.string(),
         message: z.string(),
     }),
-]);
-```
-
-### Recursive Schemas
-
-```typescript
-// For nested structures like trees
-type Category = {
-    id: number;
-    name: string;
-    children?: Category[];
-};
-
-const categorySchema: z.ZodType<Category> = z.lazy(() =>
-    z.object({
-        id: z.number(),
-        name: z.string(),
-        children: z.array(categorySchema).optional(),
-    })
-);
+])
 ```
 
 ### Schema Composition
@@ -673,82 +819,131 @@ const categorySchema: z.ZodType<Category> = z.lazy(() =>
 const timestampsSchema = z.object({
     createdAt: z.string().datetime(),
     updatedAt: z.string().datetime(),
-});
+})
 
 const auditSchema = z.object({
     createdBy: z.string(),
     updatedBy: z.string(),
-});
+})
 
 // Compose schemas
 const userSchema = z.object({
     id: z.string(),
     email: z.string().email(),
     name: z.string(),
-}).merge(timestampsSchema).merge(auditSchema);
+}).merge(timestampsSchema).merge(auditSchema)
 
 // Extend schemas
 const adminUserSchema = userSchema.extend({
     adminLevel: z.number().int().min(1).max(5),
     permissions: z.array(z.string()),
-});
+})
 
-// Pick specific fields
+// Pick specific fields (for public API responses)
 const publicUserSchema = userSchema.pick({
     id: true,
     name: true,
     // email excluded
-});
+})
 
 // Omit fields
 const userWithoutTimestamps = userSchema.omit({
     createdAt: true,
     updatedAt: true,
-});
+})
 ```
 
-### Validation Middleware
+### Shared Validation Logic
 
 ```typescript
-// Create reusable validation middleware
-import { Request, Response, NextFunction } from 'express';
-import { z } from 'zod';
+// lib/validations/shared.ts
+import { z } from 'zod'
 
-export function validateBody<T extends z.ZodType>(schema: T) {
-    return (req: Request, res: Response, next: NextFunction) => {
-        try {
-            req.body = schema.parse(req.body);
-            next();
-        } catch (error) {
-            if (error instanceof z.ZodError) {
-                return res.status(400).json({
-                    success: false,
-                    error: {
-                        message: 'Validation failed',
-                        details: error.errors,
-                    },
-                });
-            }
-            next(error);
-        }
-    };
+// Reusable field validators
+export const emailField = z.string().email('Invalid email address')
+export const passwordField = z.string().min(8, 'Password must be at least 8 characters')
+export const uuidField = z.string().uuid('Invalid ID format')
+export const slugField = z.string().regex(/^[a-z0-9-]+$/, 'Invalid slug format')
+
+// Reusable object schemas
+export const paginationSchema = z.object({
+    page: z.number().int().positive().default(1),
+    limit: z.number().int().positive().max(100).default(20),
+})
+
+export const sortSchema = z.object({
+    sortBy: z.string().optional(),
+    sortOrder: z.enum(['asc', 'desc']).default('desc'),
+})
+
+// Use in multiple actions
+export const listPostsSchema = z.object({
+    category: z.string().optional(),
+}).merge(paginationSchema).merge(sortSchema)
+```
+
+### FormData Helper Utility
+
+```typescript
+// lib/utils/formData.ts
+import { z } from 'zod'
+
+export function parseFormData<T extends z.ZodType>(
+    formData: FormData,
+    schema: T
+): z.infer<T> | { error: string; details: z.ZodError } {
+    const data = Object.fromEntries(formData.entries())
+
+    const result = schema.safeParse(data)
+
+    if (!result.success) {
+        return { error: 'Validation failed', details: result.error }
+    }
+
+    return result.data
 }
 
-// Usage
-router.post('/users',
-    validateBody(createUserSchema),
-    async (req, res) => {
-        // req.body is validated and typed!
-        const user = await userService.createUser(req.body);
-        res.json({ success: true, data: user });
+// Usage in server action
+import { parseFormData } from '@/lib/utils/formData'
+
+export async function createPost(formData: FormData) {
+    const parsed = parseFormData(formData, createPostSchema)
+
+    if ('error' in parsed) {
+        return { success: false, ...parsed }
     }
-);
+
+    // parsed is fully typed!
+    const post = await prisma.post.create({ data: parsed })
+}
 ```
 
 ---
 
+## Decision Tree: Where to Validate?
+
+**Validate in Server Actions when:**
+- ✅ Complex business logic required
+- ✅ Transactions needed
+- ✅ Server-side only validation (security)
+- ✅ Multi-step operations
+- ✅ Need to check database state
+
+**Validate in Client (RLS path) when:**
+- ✅ Simple CRUD operations
+- ✅ Immediate user feedback needed
+- ✅ No complex business rules
+- ✅ RLS handles authorization
+- ✅ Real-time validation desired
+
+**Validate in Both when:**
+- ✅ Best UX (client feedback) + Security (server enforcement)
+- ✅ Shared validation schemas
+- ✅ Progressive enhancement
+
+---
+
 **Related Files:**
-- [SKILL.md](SKILL.md) - Main guide
-- [routing-and-controllers.md](routing-and-controllers.md) - Using validation in controllers
-- [services-and-repositories.md](services-and-repositories.md) - Using DTOs in services
+- [architecture-overview.md](architecture-overview.md) - Two-path architecture patterns
+- [complete-examples.md](complete-examples.md) - Full validation examples
 - [async-and-errors.md](async-and-errors.md) - Error handling patterns

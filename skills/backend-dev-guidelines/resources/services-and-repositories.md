@@ -1,789 +1,770 @@
-# Services and Repositories - Business Logic Layer
+# Services Pattern - Next.js Server Actions
 
-Complete guide to organizing business logic with services and data access with repositories.
+Simple guide to when and how to extract reusable logic from Next.js server actions.
 
 ## Table of Contents
 
-- [Service Layer Overview](#service-layer-overview)
-- [Dependency Injection Pattern](#dependency-injection-pattern)
-- [Singleton Pattern](#singleton-pattern)
-- [Repository Pattern](#repository-pattern)
-- [Service Design Principles](#service-design-principles)
-- [Caching Strategies](#caching-strategies)
-- [Testing Services](#testing-services)
+- [The Simple Rule](#the-simple-rule)
+- [When to Extract to lib/](#when-to-extract-to-lib)
+- [Service Pattern Examples](#service-pattern-examples)
+- [Helper Functions vs Services](#helper-functions-vs-services)
+- [Testing Extracted Logic](#testing-extracted-logic)
 
 ---
 
-## Service Layer Overview
+## The Simple Rule
 
-### Purpose of Services
+**Default: Keep logic in server actions**
 
-**Services contain business logic** - the 'what' and 'why' of your application:
+Put business logic directly in server actions (`actions/*.ts`) until you have a reason to extract it.
 
+**Extract to helpers (`lib/`) only when:**
+- ✅ Used in 2+ actions
+- ✅ Complex logic (20+ lines)
+- ✅ Needs testing isolation
+- ✅ Third-party integration (Stripe, email)
+
+**What this is NOT:**
+- ❌ No dependency injection containers
+- ❌ No repository layer (use Prisma directly)
+- ❌ No service layer unless needed
+- ❌ No over-engineering
+
+**Decision tree:**
 ```
-Controller asks: "Should I do this?"
-Service answers: "Yes/No, here's why, and here's what happens"
-Repository executes: "Here's the data you requested"
+Is this used in multiple actions?
+├─ No → Keep in action
+└─ Yes → Is it complex (20+ lines)?
+    ├─ No → Keep in action (DRY isn't always better)
+    └─ Yes → Extract to lib/
 ```
-
-**Services are responsible for:**
-- ✅ Business rules enforcement
-- ✅ Orchestrating multiple repositories
-- ✅ Transaction management
-- ✅ Complex calculations
-- ✅ External service integration
-- ✅ Business validations
-
-**Services should NOT:**
-- ❌ Know about HTTP (Request/Response)
-- ❌ Direct Prisma access (use repositories)
-- ❌ Handle route-specific logic
-- ❌ Format HTTP responses
 
 ---
 
-## Dependency Injection Pattern
+## When to Extract to lib/
 
-### Why Dependency Injection?
+### Example 1: Simple - Keep in Action
 
-**Benefits:**
-- Easy to test (inject mocks)
-- Clear dependencies
-- Flexible configuration
-- Promotes loose coupling
-
-### Excellent Example: NotificationService
-
-**File:** `/blog-api/src/services/NotificationService.ts`
+**Scenario:** Creating a blog post
 
 ```typescript
-// Define dependencies interface for clarity
-export interface NotificationServiceDependencies {
-    prisma: PrismaClient;
-    batchingService: BatchingService;
-    emailComposer: EmailComposer;
-}
+// actions/posts.ts
+'use server'
+import { getCurrentUser } from '@/utils/supabase/server'
+import { prisma } from '@/lib/prisma'
+import { revalidatePath } from 'next/cache'
 
-// Service with dependency injection
-export class NotificationService {
-    private prisma: PrismaClient;
-    private batchingService: BatchingService;
-    private emailComposer: EmailComposer;
-    private preferencesCache: Map<string, { preferences: UserPreference; timestamp: number }> = new Map();
-    private CACHE_TTL = (notificationConfig.preferenceCacheTTLMinutes || 5) * 60 * 1000;
+// ✅ GOOD - Logic directly in action
+export async function createPost(formData: FormData) {
+  const user = await getCurrentUser()
+  if (!user) throw new Error('Unauthorized')
 
-    // Dependencies injected via constructor
-    constructor(dependencies: NotificationServiceDependencies) {
-        this.prisma = dependencies.prisma;
-        this.batchingService = dependencies.batchingService;
-        this.emailComposer = dependencies.emailComposer;
+  const post = await prisma.post.create({
+    data: {
+      title: formData.get('title') as string,
+      content: formData.get('content') as string,
+      userId: user.id
     }
+  })
 
-    /**
-     * Create a notification and route it appropriately
-     */
-    async createNotification(params: CreateNotificationParams) {
-        const { recipientID, type, title, message, link, context = {}, channel = 'both', priority = NotificationPriority.NORMAL } = params;
-
-        try {
-            // Get template and render content
-            const template = getNotificationTemplate(type);
-            const rendered = renderNotificationContent(template, context);
-
-            // Create in-app notification record
-            const notificationId = await createNotificationRecord({
-                instanceId: parseInt(context.instanceId || '0', 10),
-                template: type,
-                recipientUserId: recipientID,
-                channel: channel === 'email' ? 'email' : 'inApp',
-                contextData: context,
-                title: finalTitle,
-                message: finalMessage,
-                link: finalLink,
-            });
-
-            // Route notification based on channel
-            if (channel === 'email' || channel === 'both') {
-                await this.routeNotification({
-                    notificationId,
-                    userId: recipientID,
-                    type,
-                    priority,
-                    title: finalTitle,
-                    message: finalMessage,
-                    link: finalLink,
-                    context,
-                });
-            }
-
-            return notification;
-        } catch (error) {
-            ErrorLogger.log(error, {
-                context: {
-                    '[NotificationService] createNotification': {
-                        type: params.type,
-                        recipientID: params.recipientID,
-                    },
-                },
-            });
-            throw error;
-        }
-    }
-
-    /**
-     * Route notification based on user preferences
-     */
-    private async routeNotification(params: { notificationId: number; userId: string; type: string; priority: NotificationPriority; title: string; message: string; link?: string; context?: Record<string, any> }) {
-        // Get user preferences with caching
-        const preferences = await this.getUserPreferences(params.userId);
-
-        // Check if we should batch or send immediately
-        if (this.shouldBatchEmail(preferences, params.type, params.priority)) {
-            await this.batchingService.queueNotificationForBatch({
-                notificationId: params.notificationId,
-                userId: params.userId,
-                userPreference: preferences,
-                priority: params.priority,
-            });
-        } else {
-            // Send immediately via EmailComposer
-            await this.sendImmediateEmail({
-                userId: params.userId,
-                title: params.title,
-                message: params.message,
-                link: params.link,
-                context: params.context,
-                type: params.type,
-            });
-        }
-    }
-
-    /**
-     * Determine if email should be batched
-     */
-    shouldBatchEmail(preferences: UserPreference, notificationType: string, priority: NotificationPriority): boolean {
-        // HIGH priority always immediate
-        if (priority === NotificationPriority.HIGH) {
-            return false;
-        }
-
-        // Check batch mode
-        const batchMode = preferences.emailBatchMode || BatchMode.IMMEDIATE;
-        return batchMode !== BatchMode.IMMEDIATE;
-    }
-
-    /**
-     * Get user preferences with caching
-     */
-    async getUserPreferences(userId: string): Promise<UserPreference> {
-        // Check cache first
-        const cached = this.preferencesCache.get(userId);
-        if (cached && Date.now() - cached.timestamp < this.CACHE_TTL) {
-            return cached.preferences;
-        }
-
-        const preference = await this.prisma.userPreference.findUnique({
-            where: { userID: userId },
-        });
-
-        const finalPreferences = preference || DEFAULT_PREFERENCES;
-
-        // Update cache
-        this.preferencesCache.set(userId, {
-            preferences: finalPreferences,
-            timestamp: Date.now(),
-        });
-
-        return finalPreferences;
-    }
+  revalidatePath('/posts')
+  return post
 }
 ```
 
-**Usage in Controller:**
+**Why not extract?**
+- Single use case
+- Simple logic (<10 lines)
+- Clear and readable as-is
+
+### Example 2: Complex - Extract to lib/
+
+**Scenario:** Email service used by multiple actions
 
 ```typescript
-// Instantiate with dependencies
-const notificationService = new NotificationService({
-    prisma: PrismaService.main,
-    batchingService: new BatchingService(PrismaService.main),
-    emailComposer: new EmailComposer(),
-});
+// lib/email.ts
+import { Resend } from 'resend'
 
-// Use in controller
-const notification = await notificationService.createNotification({
-    recipientID: 'user-123',
-    type: 'AFRLWorkflowNotification',
-    context: { workflowName: 'AFRL Monthly Report' },
-});
+const resend = new Resend(process.env.RESEND_API_KEY)
+
+export async function sendWelcomeEmail(email: string, name: string) {
+  return await resend.emails.send({
+    from: 'noreply@example.com',
+    to: email,
+    subject: 'Welcome to our app!',
+    html: `<p>Hi ${name}, welcome aboard!</p>`
+  })
+}
+
+export async function sendPasswordResetEmail(email: string, token: string) {
+  return await resend.emails.send({
+    from: 'noreply@example.com',
+    to: email,
+    subject: 'Reset your password',
+    html: `<p>Click here to reset: ${process.env.APP_URL}/reset?token=${token}</p>`
+  })
+}
+
+export async function sendInvitationEmail(
+  email: string,
+  organizationName: string,
+  inviteToken: string
+) {
+  return await resend.emails.send({
+    from: 'noreply@example.com',
+    to: email,
+    subject: `Invitation to ${organizationName}`,
+    html: `<p>You've been invited to join ${organizationName}. Click here to accept: ${process.env.APP_URL}/invite?token=${inviteToken}</p>`
+  })
+}
 ```
 
-**Key Takeaways:**
-- Dependencies passed via constructor
-- Clear interface defines required dependencies
-- Easy to test (inject mocks)
-- Encapsulated caching logic
-- Business rules isolated from HTTP
+**Usage in multiple actions:**
+
+```typescript
+// actions/auth.ts
+'use server'
+import { sendWelcomeEmail } from '@/lib/email'
+
+export async function registerUser(formData: FormData) {
+  // ... create user
+  await sendWelcomeEmail(user.email, user.name)
+}
+
+// actions/staff.ts
+'use server'
+import { sendInvitationEmail } from '@/lib/email'
+
+export async function inviteStaffMember(email: string, orgId: string) {
+  // ... create invitation
+  await sendInvitationEmail(email, org.name, invitation.token)
+}
+```
+
+**Why extract?**
+- Used in 3+ actions
+- Third-party integration
+- Reusable email patterns
+- Easy to test in isolation
+
+### Example 3: Complex Database Queries - Extract When Reused
+
+**Scenario:** Complex query used in multiple places
+
+```typescript
+// ❌ BAD - Thin wrapper (not worth it)
+// lib/db/posts.ts
+export async function getPost(id: string) {
+  return prisma.post.findUnique({ where: { id } })
+}
+
+// ✅ GOOD - Complex reusable query
+// lib/db/posts.ts
+import { prisma } from '@/lib/prisma'
+
+export async function getPostWithEngagement(postId: string) {
+  return await prisma.post.findUnique({
+    where: { id: postId },
+    include: {
+      author: {
+        select: {
+          id: true,
+          name: true,
+          avatar: true
+        }
+      },
+      comments: {
+        take: 10,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          author: {
+            select: { name: true, avatar: true }
+          }
+        }
+      },
+      _count: {
+        select: {
+          likes: true,
+          comments: true
+        }
+      }
+    }
+  })
+}
+
+// Used in multiple actions/pages
+// actions/posts.ts
+export async function getPostForEdit(postId: string) {
+  return await getPostWithEngagement(postId)
+}
+
+// app/posts/[id]/page.tsx
+export default async function PostPage({ params }: { params: { id: string } }) {
+  const post = await getPostWithEngagement(params.id)
+  return <PostDetail post={post} />
+}
+```
+
+**Why extract?**
+- Used in 2+ places
+- Complex include logic (20+ lines if inline)
+- Consistent data structure needed
 
 ---
 
-## Singleton Pattern
+## Service Pattern Examples
 
-### When to Use Singletons
+### Pattern 1: Stripe Payment Service
 
-**Use for:**
-- Services with expensive initialization
-- Services with shared state (caching)
-- Services accessed from many places
-- Permission services
-- Configuration services
-
-### Example: PermissionService (Singleton)
-
-**File:** `/blog-api/src/services/permissionService.ts`
+**When:** Third-party integration used across multiple actions
 
 ```typescript
-import { PrismaClient } from '@prisma/client';
+// lib/stripe/payments.ts
+import Stripe from 'stripe'
 
-class PermissionService {
-    private static instance: PermissionService;
-    private prisma: PrismaClient;
-    private permissionCache: Map<string, { canAccess: boolean; timestamp: number }> = new Map();
-    private CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
+  apiVersion: '2024-01-01'
+})
 
-    // Private constructor prevents direct instantiation
-    private constructor() {
-        this.prisma = PrismaService.main;
-    }
-
-    // Get singleton instance
-    public static getInstance(): PermissionService {
-        if (!PermissionService.instance) {
-            PermissionService.instance = new PermissionService();
-        }
-        return PermissionService.instance;
-    }
-
-    /**
-     * Check if user can complete a workflow step
-     */
-    async canCompleteStep(userId: string, stepInstanceId: number): Promise<boolean> {
-        const cacheKey = `${userId}:${stepInstanceId}`;
-
-        // Check cache
-        const cached = this.permissionCache.get(cacheKey);
-        if (cached && Date.now() - cached.timestamp < this.CACHE_TTL) {
-            return cached.canAccess;
-        }
-
-        try {
-            const post = await this.prisma.post.findUnique({
-                where: { id: postId },
-                include: {
-                    author: true,
-                    comments: {
-                        include: {
-                            user: true,
-                        },
-                    },
-                },
-            });
-
-            if (!post) {
-                return false;
-            }
-
-            // Check if user has permission
-            const canEdit = post.authorId === userId ||
-                await this.isUserAdmin(userId);
-
-            // Cache result
-            this.permissionCache.set(cacheKey, {
-                canAccess: isAssigned,
-                timestamp: Date.now(),
-            });
-
-            return isAssigned;
-        } catch (error) {
-            console.error('[PermissionService] Error checking step permission:', error);
-            return false;
-        }
-    }
-
-    /**
-     * Clear cache for user
-     */
-    clearUserCache(userId: string): void {
-        for (const [key] of this.permissionCache) {
-            if (key.startsWith(`${userId}:`)) {
-                this.permissionCache.delete(key);
-            }
-        }
-    }
-
-    /**
-     * Clear all cache
-     */
-    clearCache(): void {
-        this.permissionCache.clear();
-    }
+export async function createPaymentIntent(
+  amount: number,
+  currency: string,
+  metadata: Record<string, string>
+) {
+  return await stripe.paymentIntents.create({
+    amount,
+    currency,
+    metadata,
+    automatic_payment_methods: { enabled: true }
+  })
 }
 
-// Export singleton instance
-export const permissionService = PermissionService.getInstance();
+export async function createCustomer(email: string, name: string) {
+  return await stripe.customers.create({
+    email,
+    name
+  })
+}
+
+export async function createSubscription(
+  customerId: string,
+  priceId: string
+) {
+  return await stripe.subscriptions.create({
+    customer: customerId,
+    items: [{ price: priceId }]
+  })
+}
 ```
 
 **Usage:**
 
 ```typescript
-import { permissionService } from '../services/permissionService';
+// actions/billing.ts
+'use server'
+import { getCurrentUser } from '@/utils/supabase/server'
+import { createPaymentIntent } from '@/lib/stripe/payments'
+import { prisma } from '@/lib/prisma'
 
-// Use anywhere in the codebase
-const canComplete = await permissionService.canCompleteStep(userId, stepId);
+export async function createCheckoutSession(organizationId: string) {
+  const user = await getCurrentUser()
+  if (!user) throw new Error('Unauthorized')
 
-if (!canComplete) {
-    throw new ForbiddenError('You do not have permission to complete this step');
+  const org = await prisma.organization.findUnique({
+    where: { id: organizationId }
+  })
+
+  if (!org) throw new Error('Organization not found')
+
+  // Use extracted Stripe logic
+  const paymentIntent = await createPaymentIntent(
+    org.planPrice * 100, // Convert to cents
+    'usd',
+    {
+      organizationId: org.id,
+      userId: user.id
+    }
+  )
+
+  return { clientSecret: paymentIntent.client_secret }
+}
+```
+
+### Pattern 2: Permission Checking Helper
+
+**When:** Complex authorization logic used in multiple actions
+
+```typescript
+// lib/auth-helpers.ts
+import { getCurrentUser } from '@/utils/supabase/server'
+import { prisma } from '@/lib/prisma'
+
+export async function requireOrganizationAccess(organizationId: string) {
+  const user = await getCurrentUser()
+  if (!user) throw new Error('Unauthorized')
+
+  const membership = await prisma.organizationMember.findFirst({
+    where: {
+      userId: user.id,
+      organizationId,
+      status: 'ACTIVE'
+    }
+  })
+
+  if (!membership) {
+    throw new Error('No access to this organization')
+  }
+
+  return { user, membership }
+}
+
+export async function requireOrganizationRole(
+  organizationId: string,
+  allowedRoles: string[]
+) {
+  const { user, membership } = await requireOrganizationAccess(organizationId)
+
+  if (!allowedRoles.includes(membership.role)) {
+    throw new Error(`Must be ${allowedRoles.join(' or ')}`)
+  }
+
+  return { user, membership }
+}
+```
+
+**Usage in multiple actions:**
+
+```typescript
+// actions/staff.ts
+'use server'
+import { requireOrganizationRole } from '@/lib/auth-helpers'
+import { prisma } from '@/lib/prisma'
+
+export async function addStaffMember(organizationId: string, email: string) {
+  // Only admins can add staff
+  await requireOrganizationRole(organizationId, ['ADMIN'])
+
+  return await prisma.organizationMember.create({
+    data: { organizationId, email, role: 'MEMBER' }
+  })
+}
+
+export async function deleteStaffMember(organizationId: string, memberId: string) {
+  // Only admins can delete staff
+  await requireOrganizationRole(organizationId, ['ADMIN'])
+
+  return await prisma.organizationMember.delete({
+    where: { id: memberId }
+  })
+}
+
+export async function updateProject(organizationId: string, projectId: string, data: any) {
+  // Admins and managers can update projects
+  await requireOrganizationRole(organizationId, ['ADMIN', 'MANAGER'])
+
+  return await prisma.project.update({
+    where: { id: projectId },
+    data
+  })
+}
+```
+
+### Pattern 3: Notification Service
+
+**When:** Complex logic with multiple operations, used across app
+
+```typescript
+// lib/notifications.ts
+import { prisma } from '@/lib/prisma'
+import { sendEmail } from '@/lib/email'
+
+export async function notifyUserAboutPost(
+  userId: string,
+  postId: string,
+  type: 'mention' | 'reply' | 'like'
+) {
+  // Get user preferences
+  const preferences = await prisma.userPreference.findUnique({
+    where: { userId }
+  })
+
+  // Don't notify if user has disabled notifications
+  if (!preferences?.notificationsEnabled) {
+    return
+  }
+
+  // Create in-app notification
+  const notification = await prisma.notification.create({
+    data: {
+      userId,
+      type,
+      postId,
+      read: false
+    }
+  })
+
+  // Send email if user has email notifications enabled
+  if (preferences.emailNotifications) {
+    const user = await prisma.user.findUnique({
+      where: { id: userId }
+    })
+
+    if (user?.email) {
+      await sendEmail(
+        user.email,
+        `New ${type} on your post`,
+        `You have a new ${type} on your post.`
+      )
+    }
+  }
+
+  return notification
+}
+```
+
+**Usage:**
+
+```typescript
+// actions/comments.ts
+'use server'
+import { notifyUserAboutPost } from '@/lib/notifications'
+
+export async function createComment(postId: string, content: string) {
+  const user = await getCurrentUser()
+  if (!user) throw new Error('Unauthorized')
+
+  const post = await prisma.post.findUnique({
+    where: { id: postId }
+  })
+
+  const comment = await prisma.comment.create({
+    data: {
+      postId,
+      content,
+      userId: user.id
+    }
+  })
+
+  // Notify post author about the reply
+  if (post && post.userId !== user.id) {
+    await notifyUserAboutPost(post.userId, postId, 'reply')
+  }
+
+  return comment
 }
 ```
 
 ---
 
-## Repository Pattern
+## Helper Functions vs Services
 
-### Purpose of Repositories
+### Helper Functions (Preferred for Simple Cases)
 
-**Repositories abstract data access** - the 'how' of data operations:
-
-```
-Service: "Get me all active users sorted by name"
-Repository: "Here's the Prisma query that does that"
-```
-
-**Repositories are responsible for:**
-- ✅ All Prisma operations
-- ✅ Query construction
-- ✅ Query optimization (select, include)
-- ✅ Database error handling
-- ✅ Caching database results
-
-**Repositories should NOT:**
-- ❌ Contain business logic
-- ❌ Know about HTTP
-- ❌ Make decisions (that's service layer)
-
-### Repository Template
+**Characteristics:**
+- Pure functions or simple async functions
+- No state
+- Single responsibility
+- Easy to test
 
 ```typescript
-// repositories/UserRepository.ts
-import { PrismaService } from '@project-lifecycle-portal/database';
-import type { User, Prisma } from '@project-lifecycle-portal/database';
-
-export class UserRepository {
-    /**
-     * Find user by ID with optimized query
-     */
-    async findById(userId: string): Promise<User | null> {
-        try {
-            return await PrismaService.main.user.findUnique({
-                where: { userID: userId },
-                select: {
-                    userID: true,
-                    email: true,
-                    name: true,
-                    isActive: true,
-                    roles: true,
-                    createdAt: true,
-                    updatedAt: true,
-                },
-            });
-        } catch (error) {
-            console.error('[UserRepository] Error finding user by ID:', error);
-            throw new Error(`Failed to find user: ${userId}`);
-        }
-    }
-
-    /**
-     * Find all active users
-     */
-    async findActive(options?: { orderBy?: Prisma.UserOrderByWithRelationInput }): Promise<User[]> {
-        try {
-            return await PrismaService.main.user.findMany({
-                where: { isActive: true },
-                orderBy: options?.orderBy || { name: 'asc' },
-                select: {
-                    userID: true,
-                    email: true,
-                    name: true,
-                    roles: true,
-                },
-            });
-        } catch (error) {
-            console.error('[UserRepository] Error finding active users:', error);
-            throw new Error('Failed to find active users');
-        }
-    }
-
-    /**
-     * Find user by email
-     */
-    async findByEmail(email: string): Promise<User | null> {
-        try {
-            return await PrismaService.main.user.findUnique({
-                where: { email },
-            });
-        } catch (error) {
-            console.error('[UserRepository] Error finding user by email:', error);
-            throw new Error(`Failed to find user with email: ${email}`);
-        }
-    }
-
-    /**
-     * Create new user
-     */
-    async create(data: Prisma.UserCreateInput): Promise<User> {
-        try {
-            return await PrismaService.main.user.create({ data });
-        } catch (error) {
-            console.error('[UserRepository] Error creating user:', error);
-            throw new Error('Failed to create user');
-        }
-    }
-
-    /**
-     * Update user
-     */
-    async update(userId: string, data: Prisma.UserUpdateInput): Promise<User> {
-        try {
-            return await PrismaService.main.user.update({
-                where: { userID: userId },
-                data,
-            });
-        } catch (error) {
-            console.error('[UserRepository] Error updating user:', error);
-            throw new Error(`Failed to update user: ${userId}`);
-        }
-    }
-
-    /**
-     * Delete user (soft delete by setting isActive = false)
-     */
-    async delete(userId: string): Promise<User> {
-        try {
-            return await PrismaService.main.user.update({
-                where: { userID: userId },
-                data: { isActive: false },
-            });
-        } catch (error) {
-            console.error('[UserRepository] Error deleting user:', error);
-            throw new Error(`Failed to delete user: ${userId}`);
-        }
-    }
-
-    /**
-     * Check if email exists
-     */
-    async emailExists(email: string): Promise<boolean> {
-        try {
-            const count = await PrismaService.main.user.count({
-                where: { email },
-            });
-            return count > 0;
-        } catch (error) {
-            console.error('[UserRepository] Error checking email exists:', error);
-            throw new Error('Failed to check if email exists');
-        }
-    }
+// lib/utils/formatting.ts
+export function formatCurrency(amount: number): string {
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD'
+  }).format(amount)
 }
 
-// Export singleton instance
-export const userRepository = new UserRepository();
+export function slugify(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^\w\s-]/g, '')
+    .replace(/\s+/g, '-')
+}
+
+// lib/utils/dates.ts
+export function isExpired(expiresAt: Date): boolean {
+  return new Date() > expiresAt
+}
+
+export function addDays(date: Date, days: number): Date {
+  const result = new Date(date)
+  result.setDate(result.getDate() + days)
+  return result
+}
 ```
 
-**Using Repository in Service:**
+### "Services" (Only for Complex Cases)
+
+**Use when:**
+- Multiple related operations
+- Third-party integrations
+- Needs configuration
+- Used in 3+ places
 
 ```typescript
-// services/userService.ts
-import { userRepository } from '../repositories/UserRepository';
-import { ConflictError, NotFoundError } from '../utils/errors';
+// lib/storage.ts
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3'
 
-export class UserService {
-    /**
-     * Create new user with business rules
-     */
-    async createUser(data: { email: string; name: string; roles: string[] }): Promise<User> {
-        // Business rule: Check if email already exists
-        const emailExists = await userRepository.emailExists(data.email);
-        if (emailExists) {
-            throw new ConflictError('Email already exists');
-        }
+const s3 = new S3Client({
+  region: process.env.AWS_REGION!,
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!
+  }
+})
 
-        // Business rule: Validate roles
-        const validRoles = ['admin', 'operations', 'user'];
-        const invalidRoles = data.roles.filter((role) => !validRoles.includes(role));
-        if (invalidRoles.length > 0) {
-            throw new ValidationError(`Invalid roles: ${invalidRoles.join(', ')}`);
-        }
+export async function uploadFile(
+  key: string,
+  body: Buffer,
+  contentType: string
+): Promise<string> {
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: process.env.AWS_BUCKET!,
+      Key: key,
+      Body: body,
+      ContentType: contentType
+    })
+  )
 
-        // Create user via repository
-        return await userRepository.create({
-            email: data.email,
-            name: data.name,
-            roles: data.roles,
-            isActive: true,
-        });
-    }
+  return `https://${process.env.AWS_BUCKET}.s3.amazonaws.com/${key}`
+}
 
-    /**
-     * Get user by ID
-     */
-    async getUser(userId: string): Promise<User> {
-        const user = await userRepository.findById(userId);
-
-        if (!user) {
-            throw new NotFoundError(`User not found: ${userId}`);
-        }
-
-        return user;
-    }
+export async function uploadUserAvatar(
+  userId: string,
+  file: Buffer,
+  contentType: string
+): Promise<string> {
+  const key = `avatars/${userId}-${Date.now()}`
+  return uploadFile(key, file, contentType)
 }
 ```
 
 ---
 
-## Service Design Principles
+## Testing Extracted Logic
 
-### 1. Single Responsibility
-
-Each service should have ONE clear purpose:
+### Testing Helper Functions
 
 ```typescript
-// ✅ GOOD - Single responsibility
-class UserService {
-    async createUser() {}
-    async updateUser() {}
-    async deleteUser() {}
+// lib/utils/formatting.test.ts
+import { formatCurrency, slugify } from './formatting'
+
+describe('formatCurrency', () => {
+  it('formats USD correctly', () => {
+    expect(formatCurrency(1234.56)).toBe('$1,234.56')
+  })
+})
+
+describe('slugify', () => {
+  it('converts text to slug', () => {
+    expect(slugify('Hello World!')).toBe('hello-world')
+  })
+})
+```
+
+### Testing Services
+
+```typescript
+// lib/email.test.ts
+import { sendWelcomeEmail } from './email'
+import { Resend } from 'resend'
+
+jest.mock('resend')
+
+describe('sendWelcomeEmail', () => {
+  it('sends email with correct parameters', async () => {
+    const mockSend = jest.fn().mockResolvedValue({ id: '123' })
+    ;(Resend as jest.Mock).mockImplementation(() => ({
+      emails: { send: mockSend }
+    }))
+
+    await sendWelcomeEmail('test@example.com', 'John')
+
+    expect(mockSend).toHaveBeenCalledWith({
+      from: 'noreply@example.com',
+      to: 'test@example.com',
+      subject: 'Welcome to our app!',
+      html: expect.stringContaining('John')
+    })
+  })
+})
+```
+
+### Testing Auth Helpers
+
+```typescript
+// lib/auth-helpers.test.ts
+import { requireOrganizationRole } from './auth-helpers'
+import { prisma } from '@/lib/prisma'
+
+jest.mock('@/lib/prisma')
+jest.mock('@/utils/supabase/server')
+
+describe('requireOrganizationRole', () => {
+  it('allows admin access', async () => {
+    const mockUser = { id: 'user-123' }
+    const mockMembership = { userId: 'user-123', role: 'ADMIN' }
+
+    ;(getCurrentUser as jest.Mock).mockResolvedValue(mockUser)
+    ;(prisma.organizationMember.findFirst as jest.Mock).mockResolvedValue(
+      mockMembership
+    )
+
+    const result = await requireOrganizationRole('org-123', ['ADMIN'])
+
+    expect(result.user).toEqual(mockUser)
+    expect(result.membership).toEqual(mockMembership)
+  })
+
+  it('throws error for insufficient role', async () => {
+    const mockUser = { id: 'user-123' }
+    const mockMembership = { userId: 'user-123', role: 'MEMBER' }
+
+    ;(getCurrentUser as jest.Mock).mockResolvedValue(mockUser)
+    ;(prisma.organizationMember.findFirst as jest.Mock).mockResolvedValue(
+      mockMembership
+    )
+
+    await expect(
+      requireOrganizationRole('org-123', ['ADMIN'])
+    ).rejects.toThrow('Must be ADMIN')
+  })
+})
+```
+
+---
+
+## What NOT to Do
+
+### ❌ Don't Create Thin Wrappers
+
+```typescript
+// ❌ BAD - Pointless abstraction
+// lib/db/posts.ts
+export async function getPost(id: string) {
+  return prisma.post.findUnique({ where: { id } })
 }
 
-class EmailService {
-    async sendEmail() {}
-    async sendBulkEmails() {}
+export async function createPost(data: any) {
+  return prisma.post.create({ data })
 }
 
-// ❌ BAD - Too many responsibilities
-class UserService {
-    async createUser() {}
-    async sendWelcomeEmail() {}  // Should be EmailService
-    async logUserActivity() {}   // Should be AuditService
-    async processPayment() {}    // Should be PaymentService
+// ✅ GOOD - Use Prisma directly in action
+// actions/posts.ts
+export async function getPost(id: string) {
+  return await prisma.post.findUnique({
+    where: { id },
+    include: { author: true, comments: true }
+  })
 }
 ```
 
-### 2. Clear Method Names
-
-Method names should describe WHAT they do:
+### ❌ Don't Over-Engineer with Classes
 
 ```typescript
-// ✅ GOOD - Clear intent
-async createNotification()
-async getUserPreferences()
-async shouldBatchEmail()
-async routeNotification()
+// ❌ BAD - Unnecessary class
+class PostService {
+  constructor(private prisma: PrismaClient) {}
 
-// ❌ BAD - Vague or misleading
-async process()
-async handle()
-async doIt()
-async execute()
-```
-
-### 3. Return Types
-
-Always use explicit return types:
-
-```typescript
-// ✅ GOOD - Explicit types
-async createUser(data: CreateUserDTO): Promise<User> {}
-async findUsers(): Promise<User[]> {}
-async deleteUser(id: string): Promise<void> {}
-
-// ❌ BAD - Implicit any
-async createUser(data) {}  // No types!
-```
-
-### 4. Error Handling
-
-Services should throw meaningful errors:
-
-```typescript
-// ✅ GOOD - Meaningful errors
-if (!user) {
-    throw new NotFoundError(`User not found: ${userId}`);
+  async getPost(id: string) {
+    return this.prisma.post.findUnique({ where: { id } })
+  }
 }
 
-if (emailExists) {
-    throw new ConflictError('Email already exists');
-}
-
-// ❌ BAD - Generic errors
-if (!user) {
-    throw new Error('Error');  // What error?
+// ✅ GOOD - Simple function
+export async function getPost(id: string) {
+  return await prisma.post.findUnique({ where: { id } })
 }
 ```
 
-### 5. Avoid God Services
-
-Don't create services that do everything:
+### ❌ Don't Create Repository Layer
 
 ```typescript
-// ❌ BAD - God service
-class WorkflowService {
-    async startWorkflow() {}
-    async completeStep() {}
-    async assignRoles() {}
-    async sendNotifications() {}  // Should be NotificationService
-    async validatePermissions() {}  // Should be PermissionService
-    async logAuditTrail() {}  // Should be AuditService
-    // ... 50 more methods
+// ❌ BAD - Unnecessary repository
+class PostRepository {
+  async findById(id: string) {
+    return prisma.post.findUnique({ where: { id } })
+  }
 }
 
-// ✅ GOOD - Focused services
-class WorkflowService {
-    constructor(
-        private notificationService: NotificationService,
-        private permissionService: PermissionService,
-        private auditService: AuditService
-    ) {}
+// ✅ GOOD - Use Prisma directly
+export async function getPost(id: string) {
+  return await prisma.post.findUnique({ where: { id } })
+}
+```
 
-    async startWorkflow() {
-        // Orchestrate other services
-        await this.permissionService.checkPermission();
-        await this.workflowRepository.create();
-        await this.notificationService.notify();
-        await this.auditService.log();
-    }
+### ❌ Don't Extract Too Early
+
+```typescript
+// ❌ BAD - Extracted too early (only used once)
+// lib/posts.ts
+export async function validatePostOwnership(postId: string, userId: string) {
+  const post = await prisma.post.findUnique({ where: { id: postId } })
+  return post?.userId === userId
+}
+
+// ✅ GOOD - Keep inline until used 2+ times
+// actions/posts.ts
+export async function deletePost(postId: string) {
+  const user = await getCurrentUser()
+  if (!user) throw new Error('Unauthorized')
+
+  const post = await prisma.post.findUnique({ where: { id: postId } })
+  if (!post || post.userId !== user.id) {
+    throw new Error('Cannot delete this post')
+  }
+
+  return await prisma.post.delete({ where: { id: postId } })
 }
 ```
 
 ---
 
-## Caching Strategies
+## Directory Structure
 
-### 1. In-Memory Caching
+```
+actions/                      # Server actions (primary location)
+├── posts.ts                  # Post CRUD actions
+├── comments.ts               # Comment actions
+├── staff.ts                  # Staff management
+└── billing.ts                # Billing actions
 
-```typescript
-class UserService {
-    private cache: Map<string, { user: User; timestamp: number }> = new Map();
-    private CACHE_TTL = 5 * 60 * 1000; // 5 minutes
-
-    async getUser(userId: string): Promise<User> {
-        // Check cache
-        const cached = this.cache.get(userId);
-        if (cached && Date.now() - cached.timestamp < this.CACHE_TTL) {
-            return cached.user;
-        }
-
-        // Fetch from database
-        const user = await userRepository.findById(userId);
-
-        // Update cache
-        if (user) {
-            this.cache.set(userId, { user, timestamp: Date.now() });
-        }
-
-        return user;
-    }
-
-    clearUserCache(userId: string): void {
-        this.cache.delete(userId);
-    }
-}
+lib/
+├── email.ts                  # ✅ Email service (used by 5+ actions)
+├── stripe/                   # ✅ Stripe integration (complex)
+│   ├── payments.ts
+│   └── subscriptions.ts
+├── auth-helpers.ts           # ✅ Reusable auth checks
+├── notifications.ts          # ✅ Notification logic (complex)
+├── storage.ts                # ✅ S3 uploads (third-party)
+└── utils/                    # ✅ Pure utility functions
+    ├── formatting.ts
+    ├── dates.ts
+    └── validation.ts
 ```
 
-### 2. Cache Invalidation
-
-```typescript
-class UserService {
-    async updateUser(userId: string, data: UpdateUserDTO): Promise<User> {
-        // Update in database
-        const user = await userRepository.update(userId, data);
-
-        // Invalidate cache
-        this.clearUserCache(userId);
-
-        return user;
-    }
-}
-```
+**Key principle:** Actions are the primary location. Extract to lib/ only when necessary.
 
 ---
 
-## Testing Services
+## Decision Checklist
 
-### Unit Tests
+Before extracting to lib/:
 
-```typescript
-// tests/userService.test.ts
-import { UserService } from '../services/userService';
-import { userRepository } from '../repositories/UserRepository';
-import { ConflictError } from '../utils/errors';
+- [ ] Is this used in 2+ actions? (If no, keep in action)
+- [ ] Is it complex (20+ lines)? (If no, duplication is fine)
+- [ ] Is it a third-party integration? (Extract)
+- [ ] Does it need isolated testing? (Extract)
+- [ ] Would it make the action more readable? (Maybe extract)
 
-// Mock repository
-jest.mock('../repositories/UserRepository');
-
-describe('UserService', () => {
-    let userService: UserService;
-
-    beforeEach(() => {
-        userService = new UserService();
-        jest.clearAllMocks();
-    });
-
-    describe('createUser', () => {
-        it('should create user when email does not exist', async () => {
-            // Arrange
-            const userData = {
-                email: 'test@example.com',
-                name: 'Test User',
-                roles: ['user'],
-            };
-
-            (userRepository.emailExists as jest.Mock).mockResolvedValue(false);
-            (userRepository.create as jest.Mock).mockResolvedValue({
-                userID: '123',
-                ...userData,
-            });
-
-            // Act
-            const user = await userService.createUser(userData);
-
-            // Assert
-            expect(user).toBeDefined();
-            expect(user.email).toBe(userData.email);
-            expect(userRepository.emailExists).toHaveBeenCalledWith(userData.email);
-            expect(userRepository.create).toHaveBeenCalled();
-        });
-
-        it('should throw ConflictError when email exists', async () => {
-            // Arrange
-            const userData = {
-                email: 'existing@example.com',
-                name: 'Test User',
-                roles: ['user'],
-            };
-
-            (userRepository.emailExists as jest.Mock).mockResolvedValue(true);
-
-            // Act & Assert
-            await expect(userService.createUser(userData)).rejects.toThrow(ConflictError);
-            expect(userRepository.create).not.toHaveBeenCalled();
-        });
-    });
-});
-```
+**When in doubt, keep it in the action.** You can always extract later when you actually need it.
 
 ---
 
 **Related Files:**
-- [SKILL.md](SKILL.md) - Main guide
-- [routing-and-controllers.md](routing-and-controllers.md) - Controllers that use services
-- [database-patterns.md](database-patterns.md) - Prisma and repository patterns
-- [complete-examples.md](complete-examples.md) - Full service/repository examples
+- [architecture-overview.md](architecture-overview.md) - Two-path architecture
+- [database-patterns.md](database-patterns.md) - Prisma usage patterns
+- [complete-examples.md](complete-examples.md) - Full examples with helpers
+- [middleware-guide.md](middleware-guide.md) - Auth helpers pattern
